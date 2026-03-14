@@ -3,27 +3,69 @@
   "nodes": [
     {
       "parameters": {
-        "httpMethod": "POST",
-        "path": "publish-post",
-        "responseMode": "onReceived",
+        "owner": "thatsmeadarsh",
+        "repository": "thatsmeadarsh.github.io",
+        "events": ["push"],
         "options": {}
       },
-      "id": "webhook-trigger",
-      "name": "Webhook Trigger",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
+      "id": "github-push-trigger",
+      "name": "GitHub Push Trigger",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
       "position": [240, 300],
-      "webhookId": "publish-post"
+      "webhookId": "github-pages-push",
+      "credentials": {
+        "githubApi": {
+          "id": "CONFIGURE_ME",
+          "name": "GitHub API"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Parse TOML frontmatter from Hugo markdown file\nconst input = $input.first().json;\nconst content = input.body.fileContent;\nconst fileName = input.body.fileName;\nconst slug = input.body.slug;\nconst siteBaseUrl = input.body.siteBaseUrl;\n\n// Extract TOML frontmatter between +++ delimiters\nconst frontmatterMatch = content.match(/^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/);\n\nlet title = '';\nlet date = '';\nlet draft = false;\nlet tags = [];\nlet categories = [];\nlet bodyContent = '';\n\nif (frontmatterMatch) {\n  const fm = frontmatterMatch[1];\n\n  // Parse title\n  const titleMatch = fm.match(/title\\s*=\\s*['\"](.+?)['\"]/);\n  if (titleMatch) title = titleMatch[1];\n\n  // Parse date\n  const dateMatch = fm.match(/date\\s*=\\s*['\"](.+?)['\"]/);\n  if (dateMatch) date = dateMatch[1];\n\n  // Parse draft\n  const draftMatch = fm.match(/draft\\s*=\\s*(true|false)/);\n  if (draftMatch) draft = draftMatch[1] === 'true';\n\n  // Parse tags\n  const tagsMatch = fm.match(/tags\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (tagsMatch) {\n    tags = tagsMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(t => t.replace(/['\"]*/g, '')) || [];\n  }\n\n  // Parse categories\n  const catMatch = fm.match(/categories\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (catMatch) {\n    categories = catMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(c => c.replace(/['\"]*/g, '')) || [];\n  }\n\n  // Extract body (everything after frontmatter)\n  bodyContent = content.replace(/^\\+\\+\\+[\\s\\S]*?\\+\\+\\+/, '').trim();\n}\n\n// Take first 500 words as excerpt for AI context\nconst excerpt = bodyContent.split(/\\s+/).slice(0, 500).join(' ');\n\nconst postUrl = `${siteBaseUrl}/posts/${slug}/`;\n\nreturn [{\n  json: {\n    title,\n    date,\n    draft,\n    tags,\n    categories,\n    slug,\n    fileName,\n    postUrl,\n    excerpt\n  }\n}];"
+        "jsCode": "// Extract new post slugs from GitHub Pages repo push event\nconst pushData = $input.first().json;\n\n// Only process pushes to main branch\nif (pushData.ref !== 'refs/heads/main' && pushData.ref !== 'refs/heads/master') {\n  return [];\n}\n\nconst commits = pushData.commits || [];\nconst newPostSlugs = new Set();\n\nfor (const commit of commits) {\n  const addedFiles = commit.added || [];\n  for (const file of addedFiles) {\n    // Match posts/{slug}/index.html pattern from Hugo build output\n    const match = file.match(/^posts\\/([^\\/]+)\\/index\\.html$/);\n    if (match) {\n      newPostSlugs.add(match[1]);\n    }\n  }\n}\n\nif (newPostSlugs.size === 0) {\n  return [];\n}\n\nconst siteBaseUrl = 'https://thatsmeadarsh.github.io';\n\nreturn Array.from(newPostSlugs).map(slug => ({\n  json: {\n    slug,\n    postUrl: `${siteBaseUrl}/posts/${slug}/`\n  }\n}));"
+      },
+      "id": "extract-post-slugs",
+      "name": "Extract New Post Slugs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://raw.githubusercontent.com/thatsmeadarsh/whataboutadarsh/main/content/posts/{{ $json.slug }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "fetch-post-markdown",
+      "name": "Fetch Post Markdown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_ME",
+          "name": "GitHub Raw Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse TOML frontmatter from Hugo markdown fetched from GitHub\nconst response = $input.first().json;\nconst slugData = $('Extract New Post Slugs').item.json;\nconst slug = slugData.slug;\nconst postUrl = slugData.postUrl;\n\n// Get markdown content from HTTP response\nlet content = '';\nif (typeof response === 'string') {\n  content = response;\n} else if (response.data) {\n  content = response.data;\n} else if (response.body) {\n  content = response.body;\n} else {\n  content = JSON.stringify(response);\n}\n\n// Extract TOML frontmatter between +++ delimiters\nconst frontmatterMatch = content.match(/^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/);\n\nlet title = '';\nlet date = '';\nlet draft = false;\nlet tags = [];\nlet categories = [];\nlet bodyContent = '';\n\nif (frontmatterMatch) {\n  const fm = frontmatterMatch[1];\n\n  const titleMatch = fm.match(/title\\s*=\\s*['\"](.+?)['\"]/);\n  if (titleMatch) title = titleMatch[1];\n\n  const dateMatch = fm.match(/date\\s*=\\s*['\"](.+?)['\"]/);\n  if (dateMatch) date = dateMatch[1];\n\n  const draftMatch = fm.match(/draft\\s*=\\s*(true|false)/);\n  if (draftMatch) draft = draftMatch[1] === 'true';\n\n  const tagsMatch = fm.match(/tags\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (tagsMatch) {\n    tags = tagsMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(t => t.replace(/['\"]*/g, '')) || [];\n  }\n\n  const catMatch = fm.match(/categories\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (catMatch) {\n    categories = catMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(c => c.replace(/['\"]*/g, '')) || [];\n  }\n\n  bodyContent = content.replace(/^\\+\\+\\+[\\s\\S]*?\\+\\+\\+/, '').trim();\n}\n\nconst excerpt = bodyContent.split(/\\s+/).slice(0, 500).join(' ');\n\nreturn [{\n  json: {\n    title,\n    date,\n    draft,\n    tags,\n    categories,\n    slug,\n    postUrl,\n    excerpt\n  }\n}];"
       },
       "id": "parse-frontmatter",
       "name": "Parse Frontmatter",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [480, 300]
+      "position": [960, 300]
     },
     {
       "parameters": {
@@ -53,7 +95,7 @@
       "name": "Is Not Draft?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [700, 300]
+      "position": [1180, 300]
     },
     {
       "parameters": {
@@ -63,7 +105,7 @@
       "name": "Prepare HF Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [920, 200]
+      "position": [1400, 200]
     },
     {
       "parameters": {
@@ -83,7 +125,7 @@
       "name": "AI Generate LinkedIn Post",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1140, 200],
+      "position": [1620, 200],
       "credentials": {
         "httpHeaderAuth": {
           "id": "CONFIGURE_ME",
@@ -99,7 +141,7 @@
       "name": "Format LinkedIn Post",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1360, 200]
+      "position": [1840, 200]
     },
     {
       "parameters": {
@@ -115,7 +157,7 @@
       "name": "Get LinkedIn Profile",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1580, 200],
+      "position": [2060, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -131,7 +173,7 @@
       "name": "Prepare LinkedIn Post",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1800, 200]
+      "position": [2280, 200]
     },
     {
       "parameters": {
@@ -150,7 +192,7 @@
       "name": "Post to LinkedIn",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2020, 200],
+      "position": [2500, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -164,11 +206,33 @@
       "name": "Skip (Draft)",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [920, 420]
+      "position": [1400, 420]
     }
   ],
   "connections": {
-    "Webhook Trigger": {
+    "GitHub Push Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract New Post Slugs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract New Post Slugs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Post Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Post Markdown": {
       "main": [
         [
           {

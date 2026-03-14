@@ -1,19 +1,19 @@
 # Workflow Documentation
 
-> Detailed functional documentation of the watcher script, GitHub Actions pipeline, and every node in the n8n workflow — the three systems that power zero-touch blog publishing.
+> Detailed functional documentation of the GitHub Actions pipeline and every node in the n8n workflow -- the two systems that power zero-touch blog publishing.
 
 ---
 
 ## System Overview
 
-The auto-publish pipeline consists of three independent systems triggered by a single event:
+The auto-publish pipeline consists of two systems triggered sequentially:
 
 ```mermaid
 graph TD
-    E["Event: New .md file saved"] --> W["Watcher Script"]
-    W -->|"git push"| GA["GitHub Actions"]
-    W -->|"webhook POST"| N8N["n8n Workflow"]
-    GA --> SITE["Live Website"]
+    E["Event: git push to Hugo repo"] --> GA["GitHub Actions"]
+    GA -->|"deploy"| SITE["Live Website"]
+    GA -->|"push to Pages repo"| WH["GitHub Webhook"]
+    WH --> N8N["n8n Workflow"]
     N8N --> LI["LinkedIn Post"]
 
     style E fill:#ffcc66,stroke:#333
@@ -23,59 +23,10 @@ graph TD
 
 ---
 
-## Part 1: Watcher Script
-
-**File**: `scripts/watch-and-publish.sh`
-
-The watcher is the simplest component — it detects new files and dispatches events to both pipelines.
-
-```mermaid
-graph TD
-    A[Load config.env] --> B[Start fswatch on content/posts/]
-    B --> C{New .md file?}
-    C -->|No| B
-    C -->|Yes| D[Wait 2s for write completion]
-    D --> E[git add + commit + push]
-    E --> F[POST to n8n webhook]
-    F --> G[Log result]
-    G --> B
-
-    style A fill:#99ccff,stroke:#333
-    style E fill:#ffcc66,stroke:#333
-    style F fill:#99ff99,stroke:#333
-```
-
-### Configuration
-
-All paths and URLs are loaded from `config.env`:
-
-| Variable | Purpose |
-|---|---|
-| `HUGO_DIR` | Path to the Hugo project (for git operations) |
-| `POSTS_DIR` | Path to `content/posts/` (watch target) |
-| `WEBHOOK_URL` | n8n webhook endpoint |
-| `SITE_BASE_URL` | Website base URL (for constructing post links) |
-| `LOG_DIR` | Log file location |
-
-### Webhook Payload
-
-The watcher sends this JSON to n8n:
-
-```json
-{
-  "fileName": "my-new-post.md",
-  "slug": "my-new-post",
-  "fileContent": "+++\ntitle = '...'\n+++\n\nFull markdown content...",
-  "siteBaseUrl": "https://thatsmeadarsh.github.io"
-}
-```
-
----
-
-## Part 2: GitHub Actions Pipeline
+## Part 1: GitHub Actions Pipeline
 
 **File**: `whataboutadarsh/.github/workflows/hugo.yml`
-**Trigger**: Push to `main` branch (triggered by the watcher's `git push`)
+**Trigger**: Push to `main` branch
 
 This is the **build and deploy** engine. It runs entirely in GitHub's cloud infrastructure.
 
@@ -109,9 +60,10 @@ graph TD
         PS["Push to Pages repo<br/>(using PERSONAL_ACCESS_TOKEN)"]
     end
 
-    subgraph Stage5["Stage 5: Auto-Deploy"]
+    subgraph Stage5["Stage 5: Auto-Deploy + Webhook"]
         PA["GitHub Pages Action triggers<br/>(in thatsmeadarsh.github.io)"]
         WB["Website goes live"]
+        WH["GitHub webhook fires<br/>n8n receives push event"]
     end
 
     Stage1 --> Stage2 --> Stage3 --> Stage4 --> Stage5
@@ -130,6 +82,7 @@ sequenceDiagram
     participant GA as GitHub Actions
     participant HR as Hugo Repo (whataboutadarsh)
     participant PR as Pages Repo (thatsmeadarsh.github.io)
+    participant N8N as n8n (via tunnel)
 
     GA->>GA: Read PERSONAL_ACCESS_TOKEN from secrets
     GA->>HR: Push data + public folders (PAT auth)
@@ -137,6 +90,7 @@ sequenceDiagram
     GA->>GA: Copy public/* to cloned repo
     GA->>PR: git push via x-access-token:PAT
     Note over PR: Push triggers Pages<br/>deployment workflow
+    PR->>N8N: GitHub webhook fires<br/>push event payload
 ```
 
 ### Key Configuration
@@ -144,47 +98,98 @@ sequenceDiagram
 | Setting | Value | Purpose |
 |---|---|---|
 | `persist-credentials: false` | Checkout step | Prevents default GITHUB_TOKEN from being used for pushes |
-| `PERSONAL_ACCESS_TOKEN` | Repository secret | Enables cross-repository push (Hugo repo → Pages repo) |
+| `PERSONAL_ACCESS_TOKEN` | Repository secret | Enables cross-repository push (Hugo repo -> Pages repo) |
 | `submodules: true` | Checkout step | Fetches Ananke Hugo theme |
 | `fetch-depth: 0` | Checkout step | Full git history for Hugo's `.GitInfo` |
 
 ---
 
-## Part 3: n8n Workflow
+## Part 2: n8n Workflow
 
 **File**: `workflows/auto-publish-workflow.json`
-**Trigger**: Webhook POST from watcher script
-**Total Nodes**: 9 active + 1 no-op
+**Trigger**: GitHub webhook (push event on Pages repo)
+**Total Nodes**: 12 (11 active + 1 no-op)
 
 ### Workflow Canvas
 
 ```
-Webhook    Parse       Is Not    Prepare    AI Generate   Format      Get         Prepare     Post to
-Trigger → Frontmatter → Draft? → HF Request → LinkedIn → LinkedIn → LinkedIn  → LinkedIn  → LinkedIn
-                          │        Post        Post       Profile     Post
-                          ▼
-                       Skip (Draft)
+GitHub     Extract       Fetch       Parse       Is Not    Prepare    AI Generate   Format      Get         Prepare     Post to
+Push    -> New Post   -> Post     -> Front   -> Draft? -> HF      -> LinkedIn   -> LinkedIn -> LinkedIn  -> LinkedIn  -> LinkedIn
+Trigger    Slugs        Markdown    matter                Request     Post          Post       Profile     Post
+                                                  |
+                                                  v
+                                              Skip (Draft)
 ```
 
 ### Node-by-Node Documentation
 
 ---
 
-#### Node 1: Webhook Trigger
+#### Node 1: GitHub Push Trigger
 
 | Property | Value |
 |---|---|
-| **Type** | `n8n-nodes-base.webhook` |
-| **Method** | POST |
-| **Path** | `/webhook/publish-post` |
-| **Full URL** | `http://localhost:5678/webhook/publish-post` |
-| **Response** | Immediate 200 (async processing) |
+| **Type** | `n8n-nodes-base.githubTrigger` |
+| **Event** | `push` |
+| **Repository** | `thatsmeadarsh/thatsmeadarsh.github.io` |
+| **Credentials** | GitHub API (Personal Access Token) |
 
-Receives the file content and metadata from the watcher script.
+Listens for push events on the GitHub Pages repository. When GitHub Actions pushes the built Hugo site to the Pages repo, this webhook fires and starts the workflow.
+
+**Why watch the Pages repo?** This ensures the website is actually deployed before n8n generates and publishes the LinkedIn post. If we watched the Hugo source repo instead, the LinkedIn post might go out before the site is live.
+
+**Webhook registration**: When the workflow is activated in n8n, it automatically registers a webhook on the GitHub repo via the GitHub API. The webhook URL points to n8n's public tunnel URL.
 
 ---
 
-#### Node 2: Parse Frontmatter
+#### Node 2: Extract New Post Slugs
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.code` (JavaScript) |
+| **Purpose** | Parse the push event payload to find newly added blog posts |
+
+**Logic**:
+
+```mermaid
+graph TD
+    A[Push event payload] --> B{ref = main?}
+    B -->|No| C[Return empty - stop]
+    B -->|Yes| D[Scan commits[].added files]
+    D --> E{Match posts/slug/index.html?}
+    E -->|No matches| C
+    E -->|Matches found| F[Return array of slug + postUrl items]
+
+    style C fill:#ff9999,stroke:#333
+    style F fill:#99ff99,stroke:#333
+```
+
+**Input**: GitHub push event with commits and file lists
+**Output**: Array of items, each with `slug` and `postUrl`
+
+If no new posts are found in the push (e.g., only CSS/JS changes), the node returns an empty array and the workflow stops.
+
+**Handles multiple posts**: If a single push adds multiple new posts, each is returned as a separate item and processed independently through the rest of the workflow.
+
+---
+
+#### Node 3: Fetch Post Markdown
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | GET |
+| **URL** | `https://raw.githubusercontent.com/thatsmeadarsh/whataboutadarsh/main/content/posts/{slug}.md` |
+| **Auth** | Header Auth (optional, for private repos) |
+| **Response Format** | Text |
+
+Fetches the original markdown source file from the Hugo repository. This is needed because the Pages repo only contains built HTML, but we need the original markdown with TOML frontmatter for metadata extraction and AI context.
+
+**Why raw.githubusercontent.com?** Simple GET request that returns plain text markdown. No JSON parsing or base64 decoding needed.
+
+---
+
+#### Node 4: Parse Frontmatter
 
 | Property | Value |
 |---|---|
@@ -195,7 +200,7 @@ Receives the file content and metadata from the watcher script.
 
 ```mermaid
 graph TD
-    A[Raw fileContent string] --> B["Regex match: /^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/"]
+    A[Raw markdown from GitHub] --> B["Regex match: /^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/"]
     B --> C[TOML block extracted]
     C --> D["title = regex /title\\s*=\\s*['\"](.+?)['\"]/"]
     C --> E["date = regex /date\\s*=\\s*['\"](.+?)['\"]/"]
@@ -208,6 +213,8 @@ graph TD
     style A fill:#99ccff,stroke:#333
     style J fill:#99ff99,stroke:#333
 ```
+
+Also retrieves `slug` and `postUrl` from the Extract New Post Slugs node via `$('Extract New Post Slugs').item.json`.
 
 **Supported Frontmatter Format** (Hugo TOML):
 ```toml
@@ -229,7 +236,6 @@ categories = ['Technology', 'Software Engineering']
   "tags": ["AI", "MCP", "Automation"],
   "categories": ["Technology", "Software Engineering"],
   "slug": "my-blog-post",
-  "fileName": "my-blog-post.md",
   "postUrl": "https://thatsmeadarsh.github.io/posts/my-blog-post/",
   "excerpt": "First 500 words of the article body..."
 }
@@ -237,7 +243,7 @@ categories = ['Technology', 'Software Engineering']
 
 ---
 
-#### Node 3: Is Not Draft?
+#### Node 5: Is Not Draft?
 
 | Property | Value |
 |---|---|
@@ -246,11 +252,11 @@ categories = ['Technology', 'Software Engineering']
 | **True** | Continue to AI generation |
 | **False** | Skip (no LinkedIn post) |
 
-**Why this matters**: Draft posts are committed and deployed (for preview testing) but don't trigger social media posting. This gives authors the ability to review their post on the live site before promoting it.
+**Why this matters**: Draft posts may be committed and deployed (for preview testing) but should not trigger social media posting. This gives authors the ability to review their post on the live site before promoting it.
 
 ---
 
-#### Node 4: Prepare HF Request
+#### Node 6: Prepare HF Request
 
 | Property | Value |
 |---|---|
@@ -281,7 +287,7 @@ User:   Write a compelling LinkedIn post (150-200 words) announcing my
 
 ---
 
-#### Node 5: AI Generate LinkedIn Post
+#### Node 7: AI Generate LinkedIn Post
 
 | Property | Value |
 |---|---|
@@ -318,7 +324,7 @@ sequenceDiagram
 
 ---
 
-#### Node 6: Format LinkedIn Post
+#### Node 8: Format LinkedIn Post
 
 | Property | Value |
 |---|---|
@@ -334,7 +340,7 @@ The fallback ensures LinkedIn always gets a post, even if the AI API fails.
 
 ---
 
-#### Node 7: Get LinkedIn Profile
+#### Node 9: Get LinkedIn Profile
 
 | Property | Value |
 |---|---|
@@ -344,11 +350,11 @@ The fallback ensures LinkedIn always gets a post, even if the AI API fails.
 | **Auth** | LinkedIn OAuth2 (Predefined Credential) |
 | **SSL** | Ignore SSL Issues: ON |
 
-Returns the `sub` field — the authenticated user's LinkedIn person URN ID, required for creating posts.
+Returns the `sub` field -- the authenticated user's LinkedIn person URN ID, required for creating posts.
 
 ---
 
-#### Node 8: Prepare LinkedIn Post
+#### Node 10: Prepare LinkedIn Post
 
 | Property | Value |
 |---|---|
@@ -363,7 +369,7 @@ Constructs the post with:
 
 ---
 
-#### Node 9: Post to LinkedIn
+#### Node 11: Post to LinkedIn
 
 | Property | Value |
 |---|---|
@@ -377,28 +383,41 @@ Publishes the post. Returns the created post URN on success.
 
 ---
 
+#### Node 12: Skip (Draft)
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.noOp` |
+| **Purpose** | Terminal node for draft posts |
+
+No operation -- simply marks the end of the workflow for draft posts.
+
+---
+
 ## Error Handling
 
 ```mermaid
 graph TD
-    subgraph Watcher["Watcher Script Errors"]
-        WE1["Git push fails"] --> WA1["Log error<br/>Webhook still fires"]
-        WE2["Webhook returns non-200"] --> WA2["Log warning<br/>Continue watching"]
-    end
-
     subgraph Actions["GitHub Actions Errors"]
         AE1["Hugo build fails"] --> AA1["Workflow fails<br/>Email notification to repo owner"]
         AE2["Cross-repo push fails"] --> AA2["Check PAT expiry<br/>Re-generate token"]
     end
 
+    subgraph Webhook["Webhook Errors"]
+        WE1["Tunnel not running"] --> WA1["Webhook delivery fails<br/>GitHub retries 3x"]
+        WE2["n8n workflow not active"] --> WA2["Webhook returns 404<br/>Activate workflow"]
+    end
+
     subgraph n8n["n8n Workflow Errors"]
-        NE1["HuggingFace API fails"] --> NA1["Fallback post generated<br/>title + URL + hashtags"]
-        NE2["LinkedIn API fails"] --> NA2["Execution marked as error<br/>Check OAuth token refresh"]
-        NE3["Draft post detected"] --> NA3["Skip node<br/>No LinkedIn post created"]
+        NE1["No new posts in push"] --> NA1["Workflow stops cleanly<br/>No further processing"]
+        NE2["Markdown fetch fails"] --> NA2["Workflow errors<br/>Check repo access"]
+        NE3["HuggingFace API fails"] --> NA3["Fallback post generated<br/>title + URL + hashtags"]
+        NE4["LinkedIn API fails"] --> NA4["Execution marked as error<br/>Check OAuth token refresh"]
+        NE5["Draft post detected"] --> NA5["Skip node<br/>No LinkedIn post created"]
     end
 
     style WA1 fill:#ffcc66,stroke:#333
-    style NA1 fill:#ffcc66,stroke:#333
+    style NA3 fill:#ffcc66,stroke:#333
     style AA2 fill:#ff9999,stroke:#333
 ```
 
@@ -406,13 +425,14 @@ graph TD
 
 | Failure | Website Impact | LinkedIn Impact |
 |---|---|---|
-| Watcher crashes | No new posts detected | No LinkedIn posts |
-| GitHub Actions fails | Site not updated | LinkedIn post still sent (with future URL) |
-| n8n fails | No impact — site deploys normally | No LinkedIn post |
+| GitHub Actions fails | Site not updated | n8n never fires (no push to Pages repo) |
+| Tunnel is down | No impact -- site deploys normally | Webhook fails; GitHub retries 3x |
+| n8n workflow fails | No impact -- site deploys normally | No LinkedIn post |
 | HuggingFace API down | No impact | Fallback text used |
 | LinkedIn API down | No impact | Post not published |
+| Markdown fetch fails | No impact | Workflow errors at fetch step |
 
-The **parallel pipeline design** ensures that a failure in one system doesn't cascade to the other. The website can deploy without LinkedIn, and LinkedIn can post without waiting for deployment.
+The **sequential design** ensures that n8n only fires after a successful deployment. If GitHub Actions fails, the webhook never fires, preventing premature LinkedIn posts with dead links.
 
 ---
 

@@ -1,39 +1,33 @@
 # n8n-Powered Auto Web Publish
 
-> Automated blog publishing pipeline: Write a markdown post, and it automatically builds your Hugo site via GitHub Actions, deploys to GitHub Pages, and announces it on LinkedIn with an AI-generated summary — all orchestrated through n8n and a lightweight file watcher.
+> Automated blog publishing pipeline: Write a markdown post, push to your Hugo repo, and GitHub Actions builds and deploys your site to GitHub Pages. Once deployed, n8n detects the new post via GitHub webhook, generates an AI-powered LinkedIn summary, and publishes it -- fully automated, zero manual steps.
 
 ---
 
 ## The Integration Story
 
-This project demonstrates how **n8n workflow automation** and **GitHub Actions CI/CD** can be integrated to create a **zero-touch publishing pipeline**. A single file creation event triggers two parallel systems — one for building and deploying the website, another for AI-powered social media promotion — without any manual intervention.
+This project demonstrates how **n8n workflow automation** and **GitHub Actions CI/CD** can be integrated to create a **zero-touch publishing pipeline**. A single `git push` triggers two sequential systems -- GitHub Actions for building and deploying the website, then n8n for AI-powered social media promotion -- without any manual intervention.
 
 ```mermaid
 graph TB
     subgraph Event["Trigger"]
-        A["Author saves new .md file"]
-    end
-
-    subgraph Bridge["Event Bridge (File Watcher)"]
-        B["Detect → Commit → Dispatch"]
+        A["Author pushes new post to Hugo repo"]
     end
 
     subgraph Pipeline1["Pipeline 1: GitHub Actions"]
-        C["Hugo Build → Deploy to GitHub Pages"]
+        C["Hugo Build -> Deploy to GitHub Pages"]
         D["Live Website"]
     end
 
     subgraph Pipeline2["Pipeline 2: n8n Workflow"]
-        E["Parse → AI Generate → LinkedIn Publish"]
+        E["Detect -> Fetch -> AI Generate -> LinkedIn Publish"]
         F["LinkedIn Post"]
     end
 
-    A --> B
-    B -->|"git push"| C --> D
-    B -->|"webhook POST"| E --> F
+    A -->|"git push"| C --> D
+    D -->|"GitHub webhook"| E --> F
 
     style Event fill:#ffcc66,stroke:#333
-    style Bridge fill:#99ccff,stroke:#333
     style D fill:#99ff99,stroke:#333
     style F fill:#99ff99,stroke:#333
 ```
@@ -41,21 +35,21 @@ graph TB
 ## How It Works
 
 1. **Write** a new markdown post in your Hugo project's `content/posts/` directory
-2. **fswatch** detects the new file
-3. **Watcher script** commits the post to the Hugo repo and pushes to GitHub
-4. **GitHub Actions** (auto-triggered by push) builds the Hugo site and deploys to GitHub Pages
-5. **n8n webhook** (called by watcher) receives the post content
+2. **Commit and push** to the Hugo repo's `main` branch
+3. **GitHub Actions** (auto-triggered by push) builds the Hugo site and deploys to GitHub Pages
+4. **GitHub webhook** notifies n8n when the Pages repo receives the deployed content
+5. **n8n** extracts the new post slug, fetches the original markdown from the Hugo source repo
 6. **Hugging Face AI** (Meta-Llama 3.1 via SambaNova) generates a compelling LinkedIn summary
 7. **LinkedIn API** publishes the AI-crafted post with an article link to your profile
 
-**Key Design**: GitHub Actions handles build/deploy. n8n handles AI/social. Neither duplicates the other's work.
+**Key Design**: GitHub Actions handles build/deploy. n8n handles detection, AI, and social -- triggered only after the site is live.
 
 ## Documentation
 
 | Document | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | High-level and low-level architecture, PlantUML system flows, integration patterns |
-| [Setup Guide](docs/setup-guide.md) | Step-by-step setup for n8n, GitHub, credentials, and the watcher |
+| [Setup Guide](docs/setup-guide.md) | Step-by-step setup for n8n, GitHub, credentials, and webhook configuration |
 | [Workflow Documentation](docs/workflow-documentation.md) | Node-by-node n8n workflow docs, GitHub Actions pipeline details |
 
 ## Quick Start
@@ -65,64 +59,60 @@ graph TB
 git clone https://github.com/thatsmeadarsh/n8n-powered-auto-web-publish.git
 cd n8n-powered-auto-web-publish
 
-# 2. Create your config
-cp config.sample.env config.env
-# Edit config.env with your paths and tokens
-
-# 3. Start n8n (Docker)
+# 2. Start n8n (Docker)
 docker run -d --name n8n --restart unless-stopped \
   -p 5678:5678 \
   -v n8n_data:/home/node/.n8n \
   -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
   docker.n8n.io/n8nio/n8n
+
+# 3. Expose n8n via tunnel (required for GitHub webhooks)
+ngrok http 5678
 
 # 4. Import the workflow in n8n UI (http://localhost:5678)
 # Import: workflows/auto-publish-workflow.json
-# Configure credentials: HuggingFace Header Auth + LinkedIn OAuth2
+# Configure credentials: GitHub API, HuggingFace Header Auth, LinkedIn OAuth2
 
-# 5. Start the file watcher
-./scripts/watch-and-publish.sh
+# 5. Activate the workflow -- n8n auto-registers the GitHub webhook
 ```
 
 ## Project Structure
 
 ```
 n8n-powered-auto-web-publish/
-├── README.md                  # This file
-├── config.sample.env          # Template configuration (committed)
-├── config.env                 # Your local config (gitignored)
-├── .gitignore
-├── scripts/
-│   └── watch-and-publish.sh   # File watcher + git commit + webhook trigger
-├── workflows/
-│   └── auto-publish-workflow.json  # n8n workflow (importable)
-├── docs/
-│   ├── architecture.md        # Architecture documentation
-│   ├── setup-guide.md         # Setup instructions
-│   └── workflow-documentation.md  # Workflow details
-└── screenshots/
-    └── n8n-workflow-complete.png   # n8n workflow screenshot
++-- README.md                  # This file
++-- .gitignore
++-- workflows/
+|   +-- auto-publish-workflow.json  # n8n workflow (importable)
++-- docs/
+|   +-- architecture.md        # Architecture documentation
+|   +-- setup-guide.md         # Setup instructions
+|   +-- workflow-documentation.md  # Workflow details
++-- screenshots/
+    +-- n8n-workflow-complete.png   # n8n workflow screenshot
 ```
 
 ## Architecture Summary
 
 | Component | Runs On | Responsibility |
 |---|---|---|
-| **File Watcher** | Host (macOS) | Detect new posts, commit to Git, trigger n8n |
 | **GitHub Actions** | GitHub Cloud | Hugo build, cross-repo deploy to GitHub Pages |
-| **n8n** | Docker (local) | AI content generation, LinkedIn publishing |
+| **GitHub Webhook** | GitHub Cloud | Notifies n8n when Pages repo receives a push |
+| **n8n** | Docker (local + tunnel) | Detect new posts, fetch content, AI generation, LinkedIn publishing |
 | **Hugging Face** | Cloud API | Text generation (Meta-Llama 3.1 via SambaNova) |
 | **LinkedIn** | Cloud API | Social media posting (OAuth2) |
 
 ## Tech Stack
 
-- **n8n** (v2.11+) — Workflow automation engine (Docker)
-- **GitHub Actions** — CI/CD pipeline for Hugo build + deploy
-- **Hugo** — Static site generator (Ananke theme)
-- **GitHub Pages** — Static site hosting
-- **Hugging Face Inference API** — AI text generation
-- **LinkedIn API** — Social media posting (OAuth2)
-- **fswatch** — macOS file system event monitoring
+- **n8n** (v2.11+) -- Workflow automation engine (Docker)
+- **GitHub Actions** -- CI/CD pipeline for Hugo build + deploy
+- **GitHub Webhooks** -- Event-driven notification to n8n
+- **Hugo** -- Static site generator (Ananke theme)
+- **GitHub Pages** -- Static site hosting
+- **Hugging Face Inference API** -- AI text generation
+- **LinkedIn API** -- Social media posting (OAuth2)
+- **ngrok / Cloudflare Tunnel** -- Expose local n8n to GitHub webhooks
 
 ---
 

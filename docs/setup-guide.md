@@ -8,13 +8,12 @@
 
 Before starting, ensure you have:
 
-- **macOS** (the watcher script uses macOS-compatible tools)
 - **Docker Desktop** installed and running
-- **Hugo** static site generator with a working project
 - **Git** configured with push access to your Hugo repository
 - **GitHub Actions** configured in your Hugo repo for build + deploy
 - A **Hugging Face** account
 - A **LinkedIn** account
+- A tunnel tool (**ngrok** or **Cloudflare Tunnel**) for exposing n8n to GitHub webhooks
 
 ```mermaid
 graph LR
@@ -24,8 +23,7 @@ graph LR
     end
 
     subgraph Install["To Install"]
-        FW[fswatch]
-        JQ[jq]
+        NG[ngrok or cloudflared]
     end
 
     subgraph Accounts["Accounts Needed"]
@@ -44,17 +42,13 @@ graph LR
 ## Step 1: Install Dependencies
 
 ```bash
-# Install fswatch (file system watcher)
-brew install fswatch
+# Install ngrok (for tunneling GitHub webhooks to local n8n)
+brew install ngrok
 
-# Install jq (JSON processor)
-brew install jq
-
-# Verify all tools
+# Verify tools
 git --version
 docker --version
-fswatch --version
-jq --version
+ngrok version
 ```
 
 ---
@@ -68,8 +62,11 @@ docker run -d --name n8n --restart unless-stopped \
   -p 5678:5678 \
   -v n8n_data:/home/node/.n8n \
   -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
   docker.n8n.io/n8nio/n8n
 ```
+
+> **Important**: Set `WEBHOOK_URL` to your tunnel's public URL (from Step 3). You can update this later by recreating the container.
 
 ### Verify n8n is Running
 
@@ -95,9 +92,56 @@ The Docker container may not trust SSL certificates in corporate/proxy environme
 
 ---
 
-## Step 3: Create GitHub Personal Access Token
+## Step 3: Set Up a Tunnel
 
-The Hugo repo's GitHub Actions workflow needs a PAT to push built files to the GitHub Pages repo.
+GitHub webhooks need to reach your local n8n instance. Use a tunnel to expose `localhost:5678` to the internet.
+
+### Option A: ngrok (recommended for development)
+
+```bash
+# Start the tunnel
+ngrok http 5678
+
+# Note the forwarding URL, e.g.:
+# https://abc123.ngrok-free.app -> http://localhost:5678
+```
+
+### Option B: Cloudflare Tunnel (recommended for production)
+
+```bash
+# Install cloudflared
+brew install cloudflared
+
+# Create a tunnel
+cloudflared tunnel create n8n-webhook
+cloudflared tunnel route dns n8n-webhook n8n.yourdomain.com
+cloudflared tunnel run --url http://localhost:5678 n8n-webhook
+```
+
+### Update n8n with Tunnel URL
+
+After getting your tunnel URL, update the n8n container:
+
+```bash
+docker stop n8n && docker rm n8n
+
+docker run -d --name n8n --restart unless-stopped \
+  -p 5678:5678 \
+  -v n8n_data:/home/node/.n8n \
+  -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
+  docker.n8n.io/n8nio/n8n
+```
+
+The `WEBHOOK_URL` environment variable tells n8n what public URL to use when registering webhooks with external services like GitHub.
+
+---
+
+## Step 4: Create GitHub Personal Access Tokens
+
+You need **two** GitHub PATs -- one for GitHub Actions (cross-repo push) and one for n8n (webhook registration + API access).
+
+### 4a: PAT for GitHub Actions (cross-repo push)
 
 ```mermaid
 graph TD
@@ -112,62 +156,33 @@ graph TD
 
 1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
 2. Click **"Generate new token (classic)"**
-3. **Note**: `n8n-auto-publish`
+3. **Note**: `hugo-deploy`
 4. **Expiration**: 90 days or no expiration
 5. **Scopes**: Check `repo` and `workflow`
 6. Click **Generate token** and copy the `ghp_...` value
 
 Then add it to your Hugo repo:
-1. Go to your Hugo repo → **Settings** → **Secrets and variables** → **Actions**
+1. Go to your Hugo repo > **Settings** > **Secrets and variables** > **Actions**
 2. Click **"New repository secret"**
 3. Name: `PERSONAL_ACCESS_TOKEN`, Value: the `ghp_...` token
 
----
+### 4b: PAT for n8n (webhook + API access)
 
-## Step 4: Configure the Project
+1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
+2. Click **"Generate new token (classic)"**
+3. **Note**: `n8n-webhook-access`
+4. **Expiration**: 90 days or no expiration
+5. **Scopes**: Check `repo` and `admin:repo_hook`
+6. Click **Generate token** and copy the `ghp_...` value
 
-### Clone the Repository
-
-```bash
-git clone https://github.com/thatsmeadarsh/n8n-powered-auto-web-publish.git
-cd n8n-powered-auto-web-publish
-```
-
-### Create Your Configuration
-
-```bash
-cp config.sample.env config.env
-```
-
-Edit `config.env` with your values:
-
-```bash
-# --- Hugo Project ---
-HUGO_DIR="/path/to/your/hugo-project"
-POSTS_DIR="${HUGO_DIR}/content/posts"
-
-# --- n8n Webhook ---
-WEBHOOK_URL="http://localhost:5678/webhook/publish-post"
-
-# --- Logging ---
-LOG_DIR="/path/to/n8n-powered-auto-web-publish/logs"
-
-# --- Site URL ---
-SITE_BASE_URL="https://yourusername.github.io"
-
-# --- Hugging Face ---
-HF_API_TOKEN="hf_your_token_here"
-HF_MODEL_ID="Meta-Llama-3.1-8B-Instruct"
-```
-
-> **Note**: `config.env` is gitignored and will never be committed.
+> **Note**: `admin:repo_hook` is required for n8n to automatically register/manage webhooks on your GitHub repos.
 
 ---
 
 ## Step 5: Create Hugging Face API Token
 
 1. Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-2. Click **"Create token"** → Select **"Fine-grained"**
+2. Click **"Create token"** > Select **"Fine-grained"**
 3. Name: `n8n-linkedin-publisher`
 4. Under **Inference**, check **"Make calls to Inference Providers"**
 5. Leave all other permissions unchecked
@@ -177,17 +192,36 @@ HF_MODEL_ID="Meta-Llama-3.1-8B-Instruct"
 
 ## Step 6: Set Up n8n Credentials
 
-### 6a: Hugging Face Header Auth
+### 6a: GitHub API Token
 
 1. Open n8n at `http://localhost:5678`
 2. Go to **Overview** > **Credentials** > **Add Credential**
-3. Search for **"Header Auth"**
+3. Search for **"GitHub API"**
 4. Fill in:
-   - **Name**: `Authorization`
-   - **Value**: `Bearer hf_your_token_here`
+   - **Access Token**: your `ghp_...` token (from Step 4b)
 5. Click **Save**
 
-### 6b: LinkedIn OAuth2
+### 6b: GitHub Raw Auth (Header Auth for fetching markdown)
+
+1. Go to **Overview** > **Credentials** > **Add Credential**
+2. Search for **"Header Auth"**
+3. Fill in:
+   - **Name**: `Authorization`
+   - **Value**: `token ghp_your_n8n_token_here`
+4. Save as **"GitHub Raw Auth"**
+
+> **Note**: If your Hugo source repo is public, this credential is optional. The Fetch Post Markdown node will work without auth for public repos.
+
+### 6c: Hugging Face Header Auth
+
+1. Go to **Overview** > **Credentials** > **Add Credential**
+2. Search for **"Header Auth"**
+3. Fill in:
+   - **Name**: `Authorization`
+   - **Value**: `Bearer hf_your_token_here`
+4. Save as **"HuggingFace API"**
+
+### 6d: LinkedIn OAuth2
 
 #### Create LinkedIn Developer App
 
@@ -200,7 +234,7 @@ HF_MODEL_ID="Meta-Llama-3.1-8B-Instruct"
    - Click **"Create App"**, associate with your company page
 
 3. **Request API Products**:
-   - Go to **Products** tab → Request **"Share on LinkedIn"** (grants `w_member_social`)
+   - Go to **Products** tab > Request **"Share on LinkedIn"** (grants `w_member_social`)
 
 4. **Configure Auth**:
    - Go to **Auth** tab
@@ -210,7 +244,7 @@ HF_MODEL_ID="Meta-Llama-3.1-8B-Instruct"
 #### Configure in n8n
 
 1. Import the workflow first (Step 7)
-2. Open any LinkedIn HTTP Request node → click credential dropdown → **"Create New Credential"**
+2. Open any LinkedIn HTTP Request node > click credential dropdown > **"Create New Credential"**
 3. Select **"LinkedIn OAuth2 API"**
 4. Fill in Client ID and Client Secret
 5. **Turn OFF** both toggles:
@@ -223,44 +257,33 @@ HF_MODEL_ID="Meta-Llama-3.1-8B-Instruct"
 ## Step 7: Import the n8n Workflow
 
 1. Open n8n at `http://localhost:5678`
-2. Go to **Workflows** → **"..."** → **"Import from File"**
+2. Go to **Workflows** > **"..."** > **"Import from File"**
 3. Select `workflows/auto-publish-workflow.json`
-4. Assign credentials:
+4. Assign credentials to each node:
 
 | Node | Credential |
 |---|---|
-| AI Generate LinkedIn Post | Header Auth (HuggingFace) |
+| GitHub Push Trigger | GitHub API |
+| Fetch Post Markdown | GitHub Raw Auth (Header Auth) |
+| AI Generate LinkedIn Post | HuggingFace API (Header Auth) |
 | Get LinkedIn Profile | LinkedIn OAuth2 |
 | Post to LinkedIn | LinkedIn OAuth2 |
 
-5. Enable **"Ignore SSL Issues"** on all three HTTP Request nodes
+5. Enable **"Ignore SSL Issues"** on the HTTP Request nodes (AI Generate, Get LinkedIn Profile, Post to LinkedIn)
 6. Click **Publish**
 
----
-
-## Step 8: Start the File Watcher
-
-```bash
-cd /path/to/n8n-powered-auto-web-publish
-
-# Run in foreground (for testing)
-./scripts/watch-and-publish.sh
-
-# Run in background
-nohup ./scripts/watch-and-publish.sh > /dev/null 2>&1 &
-
-# Check logs
-tail -f logs/watcher.log
-```
+> **Important**: When you activate the workflow, n8n will automatically register a webhook on the `thatsmeadarsh.github.io` repo via GitHub API. You can verify this in the repo's Settings > Webhooks.
 
 ---
 
-## Step 9: Test the Pipeline
+## Step 8: Test the Pipeline
 
-### Test with a Draft Post (safe — no LinkedIn)
+### Test with a Draft Post (safe -- no LinkedIn)
 
 ```bash
-cat > /path/to/hugo-project/content/posts/test-pipeline.md << 'EOF'
+cd /path/to/hugo-project
+
+cat > content/posts/test-pipeline.md << 'EOF'
 +++
 title = 'Test Pipeline Post'
 date = 2026-01-01T00:00:00+00:00
@@ -270,32 +293,30 @@ tags = ['test']
 
 Testing the auto-publish pipeline.
 EOF
+
+git add content/posts/test-pipeline.md
+git commit -m "Add post: test-pipeline"
+git push origin main
 ```
 
 **Expected results**:
-- Watcher commits and pushes to Hugo repo
-- GitHub Actions builds and deploys (draft won't appear on site)
-- n8n receives webhook, parses, detects `draft = true`, skips LinkedIn
+- GitHub Actions builds and deploys (draft won't appear on site by default)
+- Push to Pages repo triggers n8n webhook
+- n8n detects the new post, fetches markdown, parses it, detects `draft = true`, skips LinkedIn
 
 ### Test with a Real Post (publishes to LinkedIn)
 
-Change `draft = true` to `draft = false` and save a new file. Verify:
+Change `draft = true` to `draft = false` and push a new post. Verify:
 1. Post appears on your website
 2. LinkedIn post shows up on your profile
 
-### Test Webhook Only (skip watcher)
+### Test n8n Trigger Only (manual)
 
-```bash
-CONTENT=$(cat /path/to/hugo-project/content/posts/existing-post.md)
-curl -s -X POST "http://localhost:5678/webhook/publish-post" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg fileName "test.md" \
-    --arg slug "test" \
-    --arg content "$CONTENT" \
-    --arg siteUrl "https://yourusername.github.io" \
-    '{fileName: $fileName, slug: $slug, fileContent: $content, siteBaseUrl: $siteUrl}')"
-```
+In the n8n workflow editor:
+1. Click the **GitHub Push Trigger** node
+2. Click **"Listen for test event"**
+3. Push a change to the `thatsmeadarsh.github.io` repo (or wait for GitHub Actions to push)
+4. n8n captures the event and runs the workflow in test mode
 
 ---
 
@@ -305,11 +326,14 @@ curl -s -X POST "http://localhost:5678/webhook/publish-post" \
 |---|---|
 | **n8n not accessible** | `docker ps` to check container; `docker start n8n` |
 | **SSL errors in n8n** | Ensure `NODE_TLS_REJECT_UNAUTHORIZED=0` set; restart container |
+| **GitHub webhook not firing** | Check repo Settings > Webhooks; ensure tunnel is running |
+| **Webhook URL mismatch** | Set `WEBHOOK_URL` env var in Docker to your tunnel URL |
+| **n8n can't register webhook** | Check GitHub PAT has `admin:repo_hook` scope |
+| **No new posts detected** | Check that Hugo build adds files like `posts/{slug}/index.html` |
+| **Markdown fetch fails** | Check source repo is accessible; for private repos, configure auth |
 | **LinkedIn "unauthorized_scope"** | Turn OFF "Organization Support" and "Legacy" in credential |
-| **LinkedIn "unable to sign"** | Re-authorize: open credential → "Connect my account" |
+| **LinkedIn "unable to sign"** | Re-authorize: open credential > "Connect my account" |
 | **HuggingFace model deprecated** | Use `Meta-Llama-3.1-8B-Instruct` on `sambanova` provider |
-| **Webhook returns 404** | Workflow not published; click "Publish" in n8n |
-| **Watcher not detecting files** | Verify `fswatch` installed; check path in `config.env` |
 | **GitHub Actions fails** | Check `PERSONAL_ACCESS_TOKEN` hasn't expired |
 | **Git push rejected** | Run `git pull --rebase` in the affected repo |
 
