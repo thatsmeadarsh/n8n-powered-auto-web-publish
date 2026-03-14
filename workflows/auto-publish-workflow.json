@@ -1,0 +1,278 @@
+{
+  "name": "Auto Publish Blog to LinkedIn",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "publish-post",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "publish-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse TOML frontmatter from Hugo markdown file\nconst input = $input.first().json;\nconst content = input.body.fileContent;\nconst fileName = input.body.fileName;\nconst slug = input.body.slug;\nconst siteBaseUrl = input.body.siteBaseUrl;\n\n// Extract TOML frontmatter between +++ delimiters\nconst frontmatterMatch = content.match(/^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/);\n\nlet title = '';\nlet date = '';\nlet draft = false;\nlet tags = [];\nlet categories = [];\nlet bodyContent = '';\n\nif (frontmatterMatch) {\n  const fm = frontmatterMatch[1];\n\n  // Parse title\n  const titleMatch = fm.match(/title\\s*=\\s*['\"](.+?)['\"]/);\n  if (titleMatch) title = titleMatch[1];\n\n  // Parse date\n  const dateMatch = fm.match(/date\\s*=\\s*['\"](.+?)['\"]/);\n  if (dateMatch) date = dateMatch[1];\n\n  // Parse draft\n  const draftMatch = fm.match(/draft\\s*=\\s*(true|false)/);\n  if (draftMatch) draft = draftMatch[1] === 'true';\n\n  // Parse tags\n  const tagsMatch = fm.match(/tags\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (tagsMatch) {\n    tags = tagsMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(t => t.replace(/['\"]*/g, '')) || [];\n  }\n\n  // Parse categories\n  const catMatch = fm.match(/categories\\s*=\\s*\\[([^\\]]+)\\]/);\n  if (catMatch) {\n    categories = catMatch[1].match(/['\"]([^'\"]+)['\"]/g)\n      ?.map(c => c.replace(/['\"]*/g, '')) || [];\n  }\n\n  // Extract body (everything after frontmatter)\n  bodyContent = content.replace(/^\\+\\+\\+[\\s\\S]*?\\+\\+\\+/, '').trim();\n}\n\n// Take first 500 words as excerpt for AI context\nconst excerpt = bodyContent.split(/\\s+/).slice(0, 500).join(' ');\n\nconst postUrl = `${siteBaseUrl}/posts/${slug}/`;\n\nreturn [{\n  json: {\n    title,\n    date,\n    draft,\n    tags,\n    categories,\n    slug,\n    fileName,\n    postUrl,\n    excerpt\n  }\n}];"
+      },
+      "id": "parse-frontmatter",
+      "name": "Parse Frontmatter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "draft-check",
+              "leftValue": "={{ $json.draft }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "name": "filter.boolean.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "draft-check",
+      "name": "Is Not Draft?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the HuggingFace request body safely with proper JSON escaping\nconst data = $input.first().json;\n\nconst tagsStr = data.tags.join(', ');\nconst excerptClean = data.excerpt.substring(0, 800).replace(/[\\n\\r]+/g, ' ').replace(/[\"]/g, \"'\");\n\nconst userPrompt = `Write a compelling LinkedIn post (150-200 words) announcing my new blog article.\n\nTitle: ${data.title}\nTags: ${tagsStr}\nArticle excerpt: ${excerptClean}\nURL: ${data.postUrl}\n\nRequirements:\n- Professional but engaging tone\n- Include 2-3 relevant hashtags derived from the tags\n- End with a call to action to read the full article\n- Include the article URL\n- Use line breaks for readability\n- Maximum 2-3 emojis\n- Do NOT include the word 'hashtag', just use the # symbol`;\n\nconst requestBody = {\n  model: 'Meta-Llama-3.1-8B-Instruct',\n  messages: [\n    {\n      role: 'system',\n      content: 'You are a professional LinkedIn content writer. Write engaging posts that drive clicks and engagement. Keep the tone professional yet approachable.'\n    },\n    {\n      role: 'user',\n      content: userPrompt\n    }\n  ],\n  max_tokens: 400,\n  temperature: 0.7\n};\n\nreturn [{\n  json: {\n    ...data,\n    hfRequestBody: requestBody\n  }\n}];"
+      },
+      "id": "prepare-hf-request",
+      "name": "Prepare HF Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://router.huggingface.co/sambanova/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.hfRequestBody) }}",
+        "options": {
+          "timeout": 30000,
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "hf-generate-post",
+      "name": "AI Generate LinkedIn Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_ME",
+          "name": "HuggingFace API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the AI-generated LinkedIn post text from HF response\nconst hfResponse = $input.first().json;\nconst prevData = $('Prepare HF Request').first().json;\n\nlet linkedinText = '';\n\nif (hfResponse.choices && hfResponse.choices.length > 0) {\n  linkedinText = hfResponse.choices[0].message.content.trim();\n} else if (hfResponse[0] && hfResponse[0].generated_text) {\n  linkedinText = hfResponse[0].generated_text.trim();\n} else {\n  // Fallback: generate a simple post\n  const hashtags = prevData.tags.slice(0, 3).map(t => '#' + t.replace(/\\s+/g, '')).join(' ');\n  linkedinText = `New blog post: \"${prevData.title}\"\\n\\nCheck it out here: ${prevData.postUrl}\\n\\n${hashtags}`;\n}\n\nreturn [{\n  json: {\n    ...prevData,\n    linkedinText\n  }\n}];"
+      },
+      "id": "format-linkedin",
+      "name": "Format LinkedIn Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.linkedin.com/v2/userinfo",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linkedInOAuth2Api",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "get-linkedin-profile",
+      "name": "Get LinkedIn Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1580, 200],
+      "credentials": {
+        "linkedInOAuth2Api": {
+          "id": "CONFIGURE_ME",
+          "name": "LinkedIn account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build LinkedIn post request body with person ID from profile lookup\nconst profile = $input.first().json;\nconst postData = $('Format LinkedIn Post').first().json;\n\nconst personId = profile.sub;\n\nconst linkedinBody = {\n  author: `urn:li:person:${personId}`,\n  lifecycleState: 'PUBLISHED',\n  specificContent: {\n    'com.linkedin.ugc.ShareContent': {\n      shareCommentary: {\n        text: postData.linkedinText\n      },\n      shareMediaCategory: 'ARTICLE',\n      media: [\n        {\n          status: 'READY',\n          originalUrl: postData.postUrl,\n          title: {\n            text: postData.title\n          }\n        }\n      ]\n    }\n  },\n  visibility: {\n    'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'\n  }\n};\n\nreturn [{\n  json: {\n    linkedinBody\n  }\n}];"
+      },
+      "id": "prepare-linkedin-post",
+      "name": "Prepare LinkedIn Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/v2/ugcPosts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linkedInOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.linkedinBody) }}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "post-to-linkedin",
+      "name": "Post to LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2020, 200],
+      "credentials": {
+        "linkedInOAuth2Api": {
+          "id": "CONFIGURE_ME",
+          "name": "LinkedIn account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-op-draft",
+      "name": "Skip (Draft)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [920, 420]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Frontmatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Frontmatter": {
+      "main": [
+        [
+          {
+            "node": "Is Not Draft?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Not Draft?": {
+      "main": [
+        [
+          {
+            "node": "Prepare HF Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip (Draft)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare HF Request": {
+      "main": [
+        [
+          {
+            "node": "AI Generate LinkedIn Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Generate LinkedIn Post": {
+      "main": [
+        [
+          {
+            "node": "Format LinkedIn Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format LinkedIn Post": {
+      "main": [
+        [
+          {
+            "node": "Get LinkedIn Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get LinkedIn Profile": {
+      "main": [
+        [
+          {
+            "node": "Prepare LinkedIn Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare LinkedIn Post": {
+      "main": [
+        [
+          {
+            "node": "Post to LinkedIn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "automation"
+    },
+    {
+      "name": "blog"
+    }
+  ]
+}
