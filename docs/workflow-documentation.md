@@ -12,8 +12,8 @@ The auto-publish pipeline consists of two systems triggered sequentially:
 graph TD
     E["Event: git push to Hugo repo"] --> GA["GitHub Actions"]
     GA -->|"deploy"| SITE["Live Website"]
-    GA -->|"push to Pages repo"| WH["GitHub Webhook"]
-    WH --> N8N["n8n Workflow"]
+    GA -->|"commit to Pages repo"| POLL["n8n polls GitHub API"]
+    POLL --> N8N["n8n Workflow"]
     N8N --> LI["LinkedIn Post"]
 
     style E fill:#ffcc66,stroke:#333
@@ -47,7 +47,7 @@ graph TD
 
     subgraph Stage3["Stage 3: Build"]
         RC["Delete Hugo cache<br/>(resources/_gen)"]
-        HB["Run: hugo<br/>Generates 34 pages, 11 static files"]
+        HB["Run: hugo<br/>Generates static site"]
         CP["Commit public folder"]
         PP["Push public changes"]
     end
@@ -60,10 +60,9 @@ graph TD
         PS["Push to Pages repo<br/>(using PERSONAL_ACCESS_TOKEN)"]
     end
 
-    subgraph Stage5["Stage 5: Auto-Deploy + Webhook"]
+    subgraph Stage5["Stage 5: Auto-Deploy"]
         PA["GitHub Pages Action triggers<br/>(in thatsmeadarsh.github.io)"]
         WB["Website goes live"]
-        WH["GitHub webhook fires<br/>n8n receives push event"]
     end
 
     Stage1 --> Stage2 --> Stage3 --> Stage4 --> Stage5
@@ -73,24 +72,6 @@ graph TD
     style Stage3 fill:#e6ffe6,stroke:#333
     style Stage4 fill:#ffe6f0,stroke:#333
     style Stage5 fill:#99ff99,stroke:#333
-```
-
-### Authentication Flow
-
-```mermaid
-sequenceDiagram
-    participant GA as GitHub Actions
-    participant HR as Hugo Repo (whataboutadarsh)
-    participant PR as Pages Repo (thatsmeadarsh.github.io)
-    participant N8N as n8n (via tunnel)
-
-    GA->>GA: Read PERSONAL_ACCESS_TOKEN from secrets
-    GA->>HR: Push data + public folders (PAT auth)
-    GA->>PR: git clone (HTTPS)
-    GA->>GA: Copy public/* to cloned repo
-    GA->>PR: git push via x-access-token:PAT
-    Note over PR: Push triggers Pages<br/>deployment workflow
-    PR->>N8N: GitHub webhook fires<br/>push event payload
 ```
 
 ### Key Configuration
@@ -107,114 +88,109 @@ sequenceDiagram
 ## Part 2: n8n Workflow
 
 **File**: `workflows/auto-publish-workflow.json`
-**Trigger**: GitHub webhook (push event on Pages repo)
-**Total Nodes**: 12 (11 active + 1 no-op)
+**Trigger**: Schedule (every 5 minutes)
+**Total Nodes**: 13 (12 active + 1 no-op)
 
 ### Workflow Canvas
 
 ```
-GitHub     Extract       Fetch       Parse       Is Not    Prepare    AI Generate   Format      Get         Prepare     Post to
-Push    -> New Post   -> Post     -> Front   -> Draft? -> HF      -> LinkedIn   -> LinkedIn -> LinkedIn  -> LinkedIn  -> LinkedIn
-Trigger    Slugs        Markdown    matter                Request     Post          Post       Profile     Post
-                                                  |
-                                                  v
-                                              Skip (Draft)
+Poll Every  -> Fetch     -> Extract    -> Fetch    -> Parse     -> Is Not  -> Prepare  -> AI Generate -> Format   -> Get       -> Prepare  -> Post to
+5 Minutes     Latest       New Post      Post       Front       Draft?     HF          LinkedIn       LinkedIn    LinkedIn     LinkedIn    LinkedIn
+              Deployment   Slugs         Markdown   matter                 Request      Post           Post       Profile      Post
+                                                                  |
+                                                                  v
+                                                              Skip (Draft)
 ```
 
 ### Node-by-Node Documentation
 
 ---
 
-#### Node 1: GitHub Push Trigger
+#### Node 1: Poll Every 5 Minutes
 
 | Property | Value |
 |---|---|
-| **Type** | `n8n-nodes-base.githubTrigger` |
-| **Event** | `push` |
-| **Repository** | `thatsmeadarsh/thatsmeadarsh.github.io` |
-| **Credentials** | GitHub API (Personal Access Token) |
+| **Type** | `n8n-nodes-base.scheduleTrigger` |
+| **Interval** | Every 5 minutes |
 
-Listens for push events on the GitHub Pages repository. When GitHub Actions pushes the built Hugo site to the Pages repo, this webhook fires and starts the workflow.
+Runs the workflow on a fixed schedule. Each execution polls the GitHub API for the latest commit on the Pages repo.
 
-**Why watch the Pages repo?** This ensures the website is actually deployed before n8n generates and publishes the LinkedIn post. If we watched the Hugo source repo instead, the LinkedIn post might go out before the site is live.
-
-**Webhook registration**: When the workflow is activated in n8n, it automatically registers a webhook on the GitHub repo via the GitHub API. The webhook URL points to n8n's public tunnel URL.
+**Why 5 minutes?** Balances responsiveness (typical GitHub Actions deployment takes 1-3 minutes) with API rate limits (GitHub allows 5000 authenticated requests/hour).
 
 ---
 
-#### Node 2: Extract New Post Slugs
+#### Node 2: Fetch Latest Deployment
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | GET |
+| **URL** | `https://api.github.com/repos/thatsmeadarsh/thatsmeadarsh.github.io/commits/main` |
+| **Auth** | GitHub API (predefined credential) |
+| **SSL** | Ignore SSL Issues: ON |
+
+Fetches the latest commit on the Pages repo's `main` branch. The response includes:
+- `sha` -- commit hash (used for change detection)
+- `files[]` -- list of files changed with `filename` and `status` (added/modified/removed)
+
+---
+
+#### Node 3: Extract New Post Slugs
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Parse the push event payload to find newly added blog posts |
+| **Purpose** | Detect new deployments and extract blog post slugs |
+
+**State Management**: Uses `$getWorkflowStaticData('global')` to persist the last processed commit SHA between executions.
 
 **Logic**:
 
 ```mermaid
 graph TD
-    A[Push event payload] --> B{ref = main?}
-    B -->|No| C[Return empty - stop]
-    B -->|Yes| D[Scan commits[].added files]
-    D --> E{Match posts/slug/index.html?}
-    E -->|No matches| C
-    E -->|Matches found| F[Return array of slug + postUrl items]
+    A[Get latest commit SHA] --> B{Same as stored SHA?}
+    B -->|Yes| C[Return empty - stop]
+    B -->|No| D[Store new SHA]
+    D --> E{First run?}
+    E -->|Yes| C
+    E -->|No| F[Scan files for posts/slug/index.html]
+    F --> G{New posts found?}
+    G -->|No| C
+    G -->|Yes| H[Return array of slug + postUrl items]
 
     style C fill:#ff9999,stroke:#333
-    style F fill:#99ff99,stroke:#333
+    style H fill:#99ff99,stroke:#333
 ```
 
-**Input**: GitHub push event with commits and file lists
-**Output**: Array of items, each with `slug` and `postUrl`
-
-If no new posts are found in the push (e.g., only CSS/JS changes), the node returns an empty array and the workflow stops.
-
-**Handles multiple posts**: If a single push adds multiple new posts, each is returned as a separate item and processed independently through the rest of the workflow.
+**Three exit conditions** (returns empty, stopping the workflow):
+1. Same commit as last poll -- no new deployment
+2. First run -- stores initial SHA without processing
+3. New commit but no new post files -- deployment only changed CSS/JS/etc.
 
 ---
 
-#### Node 3: Fetch Post Markdown
+#### Node 4: Fetch Post Markdown
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.httpRequest` |
 | **Method** | GET |
 | **URL** | `https://raw.githubusercontent.com/thatsmeadarsh/whataboutadarsh/main/content/posts/{slug}.md` |
-| **Auth** | Header Auth (optional, for private repos) |
 | **Response Format** | Text |
+| **SSL** | Ignore SSL Issues: ON |
 
-Fetches the original markdown source file from the Hugo repository. This is needed because the Pages repo only contains built HTML, but we need the original markdown with TOML frontmatter for metadata extraction and AI context.
-
-**Why raw.githubusercontent.com?** Simple GET request that returns plain text markdown. No JSON parsing or base64 decoding needed.
+Fetches the original markdown source file from the Hugo repository. Needed because the Pages repo only contains built HTML, but we need the original markdown with TOML frontmatter.
 
 ---
 
-#### Node 4: Parse Frontmatter
+#### Node 5: Parse Frontmatter
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
 | **Purpose** | Extract structured metadata from Hugo's TOML frontmatter |
 
-**Parsing Logic**:
-
-```mermaid
-graph TD
-    A[Raw markdown from GitHub] --> B["Regex match: /^\\+\\+\\+([\\s\\S]*?)\\+\\+\\+/"]
-    B --> C[TOML block extracted]
-    C --> D["title = regex /title\\s*=\\s*['\"](.+?)['\"]/"]
-    C --> E["date = regex /date\\s*=\\s*['\"](.+?)['\"]/"]
-    C --> F["draft = regex /draft\\s*=\\s*(true|false)/"]
-    C --> G["tags = regex /tags\\s*=\\s*\\[([^\\]]+)\\]/"]
-    C --> H["categories = similar pattern"]
-    A --> I["Body = content after closing +++"]
-    I --> J["Excerpt = first 500 words"]
-
-    style A fill:#99ccff,stroke:#333
-    style J fill:#99ff99,stroke:#333
-```
-
-Also retrieves `slug` and `postUrl` from the Extract New Post Slugs node via `$('Extract New Post Slugs').item.json`.
+Retrieves `slug` and `postUrl` from the Extract New Post Slugs node via `$('Extract New Post Slugs').item.json`.
 
 **Supported Frontmatter Format** (Hugo TOML):
 ```toml
@@ -243,7 +219,7 @@ categories = ['Technology', 'Software Engineering']
 
 ---
 
-#### Node 5: Is Not Draft?
+#### Node 6: Is Not Draft?
 
 | Property | Value |
 |---|---|
@@ -252,42 +228,18 @@ categories = ['Technology', 'Software Engineering']
 | **True** | Continue to AI generation |
 | **False** | Skip (no LinkedIn post) |
 
-**Why this matters**: Draft posts may be committed and deployed (for preview testing) but should not trigger social media posting. This gives authors the ability to review their post on the live site before promoting it.
-
 ---
 
-#### Node 6: Prepare HF Request
+#### Node 7: Prepare HF Request
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Build a safe, properly escaped JSON request body |
-
-**Why a separate code node?** Blog content contains quotes, newlines, markdown syntax, HTML, and special characters. Directly interpolating these into the HTTP Request node's JSON template causes parsing errors. This node builds the request programmatically.
-
-**AI Prompt Structure**:
-```
-System: You are a professional LinkedIn content writer. Write engaging
-        posts that drive clicks and engagement.
-
-User:   Write a compelling LinkedIn post (150-200 words) announcing my
-        new blog article.
-
-        Title: {extracted title}
-        Tags: {extracted tags}
-        Article excerpt: {first 800 chars}
-        URL: {constructed post URL}
-
-        Requirements:
-        - Professional but engaging tone
-        - 2-3 relevant hashtags from tags
-        - Call to action with article URL
-        - Maximum 2-3 emojis
-```
+| **Purpose** | Build a safe, properly escaped JSON request body for the AI API |
 
 ---
 
-#### Node 7: AI Generate LinkedIn Post
+#### Node 8: AI Generate LinkedIn Post
 
 | Property | Value |
 |---|---|
@@ -298,99 +250,60 @@ User:   Write a compelling LinkedIn post (150-200 words) announcing my
 | **SSL** | Ignore SSL Issues: ON |
 | **Timeout** | 30 seconds |
 
-```mermaid
-sequenceDiagram
-    participant N as n8n
-    participant R as HuggingFace Router
-    participant S as SambaNova Provider
-    participant M as Meta-Llama-3.1-8B
-
-    N->>R: POST /sambanova/v1/chat/completions
-    R->>S: Route to serverless endpoint
-    S->>M: Run inference
-    M-->>S: Generated text (~200 words)
-    S-->>R: OpenAI-compatible response
-    R-->>N: {choices: [{message: {content: "..."}}]}
-```
-
-**Model Configuration**:
-
-| Parameter | Value | Rationale |
-|---|---|---|
-| Model | `Meta-Llama-3.1-8B-Instruct` | Free tier, good instruction-following |
-| Provider | SambaNova | Fast serverless inference |
-| max_tokens | 400 | Enough for 200-word post |
-| temperature | 0.7 | Creative but coherent |
+**Model**: `Meta-Llama-3.1-8B-Instruct` via SambaNova provider. Free tier, OpenAI-compatible API.
 
 ---
 
-#### Node 8: Format LinkedIn Post
+#### Node 9: Format LinkedIn Post
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
 | **Purpose** | Extract AI text with fallback handling |
 
-**Logic**:
-1. Try `choices[0].message.content` (OpenAI-compatible format)
-2. Fallback: try `[0].generated_text` (legacy HF format)
-3. Final fallback: simple post with title + URL + hashtags
-
-The fallback ensures LinkedIn always gets a post, even if the AI API fails.
+Tries `choices[0].message.content`, falls back to `[0].generated_text`, then to a simple title + URL + hashtags post.
 
 ---
 
-#### Node 9: Get LinkedIn Profile
+#### Node 10: Get LinkedIn Profile
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.httpRequest` |
 | **Method** | GET |
 | **URL** | `https://api.linkedin.com/v2/userinfo` |
-| **Auth** | LinkedIn OAuth2 (Predefined Credential) |
-| **SSL** | Ignore SSL Issues: ON |
+| **Auth** | LinkedIn OAuth2 |
 
-Returns the `sub` field -- the authenticated user's LinkedIn person URN ID, required for creating posts.
+Returns the `sub` field -- the person URN ID.
 
 ---
 
-#### Node 10: Prepare LinkedIn Post
+#### Node 11: Prepare LinkedIn Post
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
 | **Purpose** | Build LinkedIn UGC Post API body |
 
-Constructs the post with:
-- **Author**: `urn:li:person:{sub}` from profile lookup
-- **Commentary**: AI-generated text
-- **Media**: Article link (renders as a link preview card on LinkedIn)
-- **Visibility**: Public
-
 ---
 
-#### Node 11: Post to LinkedIn
+#### Node 12: Post to LinkedIn
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.httpRequest` |
 | **Method** | POST |
 | **URL** | `https://api.linkedin.com/v2/ugcPosts` |
-| **Auth** | LinkedIn OAuth2 (Predefined Credential) |
-| **SSL** | Ignore SSL Issues: ON |
-
-Publishes the post. Returns the created post URN on success.
+| **Auth** | LinkedIn OAuth2 |
 
 ---
 
-#### Node 12: Skip (Draft)
+#### Node 13: Skip (Draft)
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.noOp` |
 | **Purpose** | Terminal node for draft posts |
-
-No operation -- simply marks the end of the workflow for draft posts.
 
 ---
 
@@ -399,25 +312,20 @@ No operation -- simply marks the end of the workflow for draft posts.
 ```mermaid
 graph TD
     subgraph Actions["GitHub Actions Errors"]
-        AE1["Hugo build fails"] --> AA1["Workflow fails<br/>Email notification to repo owner"]
-        AE2["Cross-repo push fails"] --> AA2["Check PAT expiry<br/>Re-generate token"]
-    end
-
-    subgraph Webhook["Webhook Errors"]
-        WE1["Tunnel not running"] --> WA1["Webhook delivery fails<br/>GitHub retries 3x"]
-        WE2["n8n workflow not active"] --> WA2["Webhook returns 404<br/>Activate workflow"]
+        AE1["Hugo build fails"] --> AA1["Workflow fails<br/>Email notification"]
+        AE2["Cross-repo push fails"] --> AA2["Check PAT expiry"]
     end
 
     subgraph n8n["n8n Workflow Errors"]
-        NE1["No new posts in push"] --> NA1["Workflow stops cleanly<br/>No further processing"]
-        NE2["Markdown fetch fails"] --> NA2["Workflow errors<br/>Check repo access"]
-        NE3["HuggingFace API fails"] --> NA3["Fallback post generated<br/>title + URL + hashtags"]
-        NE4["LinkedIn API fails"] --> NA4["Execution marked as error<br/>Check OAuth token refresh"]
-        NE5["Draft post detected"] --> NA5["Skip node<br/>No LinkedIn post created"]
+        NE1["GitHub API unreachable"] --> NA1["Poll fails<br/>Retries next cycle"]
+        NE2["No new posts in commit"] --> NA2["Workflow stops cleanly"]
+        NE3["Markdown fetch fails"] --> NA3["Workflow errors<br/>Check repo access"]
+        NE4["HuggingFace API fails"] --> NA4["Fallback post generated"]
+        NE5["LinkedIn API fails"] --> NA5["Check OAuth refresh"]
+        NE6["Draft post detected"] --> NA6["Skip node"]
     end
 
-    style WA1 fill:#ffcc66,stroke:#333
-    style NA3 fill:#ffcc66,stroke:#333
+    style NA4 fill:#ffcc66,stroke:#333
     style AA2 fill:#ff9999,stroke:#333
 ```
 
@@ -425,14 +333,11 @@ graph TD
 
 | Failure | Website Impact | LinkedIn Impact |
 |---|---|---|
-| GitHub Actions fails | Site not updated | n8n never fires (no push to Pages repo) |
-| Tunnel is down | No impact -- site deploys normally | Webhook fails; GitHub retries 3x |
-| n8n workflow fails | No impact -- site deploys normally | No LinkedIn post |
+| GitHub Actions fails | Site not updated | n8n sees no new commit -- no action |
+| GitHub API rate limit | No impact | Poll fails; retries in 5 minutes |
+| n8n workflow fails | No impact | No LinkedIn post |
 | HuggingFace API down | No impact | Fallback text used |
 | LinkedIn API down | No impact | Post not published |
-| Markdown fetch fails | No impact | Workflow errors at fetch step |
-
-The **sequential design** ensures that n8n only fires after a successful deployment. If GitHub Actions fails, the webhook never fires, preventing premature LinkedIn posts with dead links.
 
 ---
 

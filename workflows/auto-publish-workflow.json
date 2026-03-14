@@ -3,17 +3,45 @@
   "nodes": [
     {
       "parameters": {
-        "owner": "thatsmeadarsh",
-        "repository": "thatsmeadarsh.github.io",
-        "events": ["push"],
-        "options": {}
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
       },
-      "id": "github-push-trigger",
-      "name": "GitHub Push Trigger",
-      "type": "n8n-nodes-base.githubTrigger",
-      "typeVersion": 1,
-      "position": [240, 300],
-      "webhookId": "github-pages-push",
+      "id": "schedule-trigger",
+      "name": "Poll Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/thatsmeadarsh/thatsmeadarsh.github.io/commits/main",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "fetch-latest-commit",
+      "name": "Fetch Latest Deployment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
       "credentials": {
         "githubApi": {
           "id": "CONFIGURE_ME",
@@ -23,21 +51,20 @@
     },
     {
       "parameters": {
-        "jsCode": "// Extract new post slugs from GitHub Pages repo push event\nconst pushData = $input.first().json;\n\n// Only process pushes to main branch\nif (pushData.ref !== 'refs/heads/main' && pushData.ref !== 'refs/heads/master') {\n  return [];\n}\n\nconst commits = pushData.commits || [];\nconst newPostSlugs = new Set();\n\nfor (const commit of commits) {\n  const addedFiles = commit.added || [];\n  for (const file of addedFiles) {\n    // Match posts/{slug}/index.html pattern from Hugo build output\n    const match = file.match(/^posts\\/([^\\/]+)\\/index\\.html$/);\n    if (match) {\n      newPostSlugs.add(match[1]);\n    }\n  }\n}\n\nif (newPostSlugs.size === 0) {\n  return [];\n}\n\nconst siteBaseUrl = 'https://thatsmeadarsh.github.io';\n\nreturn Array.from(newPostSlugs).map(slug => ({\n  json: {\n    slug,\n    postUrl: `${siteBaseUrl}/posts/${slug}/`\n  }\n}));"
+        "jsCode": "// Check for new posts in the latest Pages repo commit\nconst commit = $input.first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nconst currentSha = commit.sha;\nconst lastProcessedSha = staticData.lastProcessedSha;\n\n// Same commit as last poll — nothing new\nif (currentSha === lastProcessedSha) {\n  return [];\n}\n\n// Store the new SHA for next poll\nstaticData.lastProcessedSha = currentSha;\n\n// First run (no stored SHA) — just initialize, don't process\nif (!lastProcessedSha) {\n  return [];\n}\n\n// Scan commit files for newly added posts\nconst files = commit.files || [];\nconst newPostSlugs = new Set();\n\nfor (const file of files) {\n  if (file.status === 'added') {\n    const match = file.filename.match(/^posts\\/([^\\/]+)\\/index\\.html$/);\n    if (match) {\n      newPostSlugs.add(match[1]);\n    }\n  }\n}\n\nif (newPostSlugs.size === 0) {\n  return [];\n}\n\nconst siteBaseUrl = 'https://thatsmeadarsh.github.io';\n\nreturn Array.from(newPostSlugs).map(slug => ({\n  json: {\n    slug,\n    postUrl: `${siteBaseUrl}/posts/${slug}/`\n  }\n}));"
       },
       "id": "extract-post-slugs",
       "name": "Extract New Post Slugs",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [480, 300]
+      "position": [720, 300]
     },
     {
       "parameters": {
         "method": "GET",
         "url": "=https://raw.githubusercontent.com/thatsmeadarsh/whataboutadarsh/main/content/posts/{{ $json.slug }}.md",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
         "options": {
+          "allowUnauthorizedCerts": true,
           "response": {
             "response": {
               "responseFormat": "text"
@@ -49,13 +76,7 @@
       "name": "Fetch Post Markdown",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [720, 300],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "CONFIGURE_ME",
-          "name": "GitHub Raw Auth"
-        }
-      }
+      "position": [960, 300]
     },
     {
       "parameters": {
@@ -65,7 +86,7 @@
       "name": "Parse Frontmatter",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [960, 300]
+      "position": [1200, 300]
     },
     {
       "parameters": {
@@ -95,7 +116,7 @@
       "name": "Is Not Draft?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [1180, 300]
+      "position": [1420, 300]
     },
     {
       "parameters": {
@@ -105,7 +126,7 @@
       "name": "Prepare HF Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1400, 200]
+      "position": [1640, 200]
     },
     {
       "parameters": {
@@ -125,7 +146,7 @@
       "name": "AI Generate LinkedIn Post",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1620, 200],
+      "position": [1860, 200],
       "credentials": {
         "httpHeaderAuth": {
           "id": "CONFIGURE_ME",
@@ -141,7 +162,7 @@
       "name": "Format LinkedIn Post",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1840, 200]
+      "position": [2080, 200]
     },
     {
       "parameters": {
@@ -157,7 +178,7 @@
       "name": "Get LinkedIn Profile",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2060, 200],
+      "position": [2300, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -173,7 +194,7 @@
       "name": "Prepare LinkedIn Post",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2280, 200]
+      "position": [2520, 200]
     },
     {
       "parameters": {
@@ -192,7 +213,7 @@
       "name": "Post to LinkedIn",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2500, 200],
+      "position": [2740, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -206,11 +227,22 @@
       "name": "Skip (Draft)",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [1400, 420]
+      "position": [1640, 420]
     }
   ],
   "connections": {
-    "GitHub Push Trigger": {
+    "Poll Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch Latest Deployment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Latest Deployment": {
       "main": [
         [
           {

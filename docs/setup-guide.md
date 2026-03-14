@@ -13,17 +13,12 @@ Before starting, ensure you have:
 - **GitHub Actions** configured in your Hugo repo for build + deploy
 - A **Hugging Face** account
 - A **LinkedIn** account
-- A tunnel tool (**ngrok** or **Cloudflare Tunnel**) for exposing n8n to GitHub webhooks
 
 ```mermaid
 graph LR
     subgraph Required["Required Tools"]
         D[Docker]
         G[Git]
-    end
-
-    subgraph Install["To Install"]
-        NG[ngrok or cloudflared]
     end
 
     subgraph Accounts["Accounts Needed"]
@@ -33,27 +28,12 @@ graph LR
     end
 
     style Required fill:#99ff99,stroke:#333
-    style Install fill:#ffcc66,stroke:#333
     style Accounts fill:#99ccff,stroke:#333
 ```
 
 ---
 
-## Step 1: Install Dependencies
-
-```bash
-# Install ngrok (for tunneling GitHub webhooks to local n8n)
-brew install ngrok
-
-# Verify tools
-git --version
-docker --version
-ngrok version
-```
-
----
-
-## Step 2: Set Up n8n in Docker
+## Step 1: Set Up n8n in Docker
 
 ### Start n8n
 
@@ -62,11 +42,8 @@ docker run -d --name n8n --restart unless-stopped \
   -p 5678:5678 \
   -v n8n_data:/home/node/.n8n \
   -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
-  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
   docker.n8n.io/n8nio/n8n
 ```
-
-> **Important**: Set `WEBHOOK_URL` to your tunnel's public URL (from Step 3). You can update this later by recreating the container.
 
 ### Verify n8n is Running
 
@@ -92,63 +69,20 @@ The Docker container may not trust SSL certificates in corporate/proxy environme
 
 ---
 
-## Step 3: Set Up a Tunnel
+## Step 2: Create GitHub Personal Access Token
 
-GitHub webhooks need to reach your local n8n instance. Use a tunnel to expose `localhost:5678` to the internet.
+You need a PAT for two purposes:
+- **GitHub Actions**: cross-repo push from Hugo repo to Pages repo
+- **n8n**: reading commits and fetching file content from GitHub API
 
-### Option A: ngrok (recommended for development)
-
-```bash
-# Start the tunnel
-ngrok http 5678
-
-# Note the forwarding URL, e.g.:
-# https://abc123.ngrok-free.app -> http://localhost:5678
-```
-
-### Option B: Cloudflare Tunnel (recommended for production)
-
-```bash
-# Install cloudflared
-brew install cloudflared
-
-# Create a tunnel
-cloudflared tunnel create n8n-webhook
-cloudflared tunnel route dns n8n-webhook n8n.yourdomain.com
-cloudflared tunnel run --url http://localhost:5678 n8n-webhook
-```
-
-### Update n8n with Tunnel URL
-
-After getting your tunnel URL, update the n8n container:
-
-```bash
-docker stop n8n && docker rm n8n
-
-docker run -d --name n8n --restart unless-stopped \
-  -p 5678:5678 \
-  -v n8n_data:/home/node/.n8n \
-  -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
-  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
-  docker.n8n.io/n8nio/n8n
-```
-
-The `WEBHOOK_URL` environment variable tells n8n what public URL to use when registering webhooks with external services like GitHub.
-
----
-
-## Step 4: Create GitHub Personal Access Tokens
-
-You need **two** GitHub PATs -- one for GitHub Actions (cross-repo push) and one for n8n (webhook registration + API access).
-
-### 4a: PAT for GitHub Actions (cross-repo push)
+You can use the same token for both.
 
 ```mermaid
 graph TD
     A[Go to github.com/settings/tokens] --> B[Generate new token - classic]
     B --> C["Check scopes: repo + workflow"]
     C --> D[Generate and copy token]
-    D --> E[Add as repo secret: PERSONAL_ACCESS_TOKEN]
+    D --> E[Add as repo secret + n8n credential]
 
     style A fill:#99ccff,stroke:#333
     style E fill:#99ff99,stroke:#333
@@ -156,7 +90,7 @@ graph TD
 
 1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
 2. Click **"Generate new token (classic)"**
-3. **Note**: `hugo-deploy`
+3. **Note**: `n8n-auto-publish`
 4. **Expiration**: 90 days or no expiration
 5. **Scopes**: Check `repo` and `workflow`
 6. Click **Generate token** and copy the `ghp_...` value
@@ -166,20 +100,9 @@ Then add it to your Hugo repo:
 2. Click **"New repository secret"**
 3. Name: `PERSONAL_ACCESS_TOKEN`, Value: the `ghp_...` token
 
-### 4b: PAT for n8n (webhook + API access)
-
-1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
-2. Click **"Generate new token (classic)"**
-3. **Note**: `n8n-webhook-access`
-4. **Expiration**: 90 days or no expiration
-5. **Scopes**: Check `repo` and `admin:repo_hook`
-6. Click **Generate token** and copy the `ghp_...` value
-
-> **Note**: `admin:repo_hook` is required for n8n to automatically register/manage webhooks on your GitHub repos.
-
 ---
 
-## Step 5: Create Hugging Face API Token
+## Step 3: Create Hugging Face API Token
 
 1. Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 2. Click **"Create token"** > Select **"Fine-grained"**
@@ -190,29 +113,20 @@ Then add it to your Hugo repo:
 
 ---
 
-## Step 6: Set Up n8n Credentials
+## Step 4: Set Up n8n Credentials
 
-### 6a: GitHub API Token
+### 4a: GitHub API
 
 1. Open n8n at `http://localhost:5678`
 2. Go to **Overview** > **Credentials** > **Add Credential**
 3. Search for **"GitHub API"**
 4. Fill in:
-   - **Access Token**: your `ghp_...` token (from Step 4b)
+   - **Github Server**: `https://api.github.com` (default)
+   - **User**: your GitHub username (e.g., `thatsmeadarsh`)
+   - **Access Token**: your `ghp_...` token
 5. Click **Save**
 
-### 6b: GitHub Raw Auth (Header Auth for fetching markdown)
-
-1. Go to **Overview** > **Credentials** > **Add Credential**
-2. Search for **"Header Auth"**
-3. Fill in:
-   - **Name**: `Authorization`
-   - **Value**: `token ghp_your_n8n_token_here`
-4. Save as **"GitHub Raw Auth"**
-
-> **Note**: If your Hugo source repo is public, this credential is optional. The Fetch Post Markdown node will work without auth for public repos.
-
-### 6c: Hugging Face Header Auth
+### 4b: Hugging Face Header Auth
 
 1. Go to **Overview** > **Credentials** > **Add Credential**
 2. Search for **"Header Auth"**
@@ -221,7 +135,7 @@ Then add it to your Hugo repo:
    - **Value**: `Bearer hf_your_token_here`
 4. Save as **"HuggingFace API"**
 
-### 6d: LinkedIn OAuth2
+### 4c: LinkedIn OAuth2
 
 #### Create LinkedIn Developer App
 
@@ -243,7 +157,7 @@ Then add it to your Hugo repo:
 
 #### Configure in n8n
 
-1. Import the workflow first (Step 7)
+1. Import the workflow first (Step 5)
 2. Open any LinkedIn HTTP Request node > click credential dropdown > **"Create New Credential"**
 3. Select **"LinkedIn OAuth2 API"**
 4. Fill in Client ID and Client Secret
@@ -254,7 +168,7 @@ Then add it to your Hugo repo:
 
 ---
 
-## Step 7: Import the n8n Workflow
+## Step 5: Import the n8n Workflow
 
 1. Open n8n at `http://localhost:5678`
 2. Go to **Workflows** > **"..."** > **"Import from File"**
@@ -263,20 +177,20 @@ Then add it to your Hugo repo:
 
 | Node | Credential |
 |---|---|
-| GitHub Push Trigger | GitHub API |
-| Fetch Post Markdown | GitHub Raw Auth (Header Auth) |
+| Fetch Latest Deployment | GitHub API |
 | AI Generate LinkedIn Post | HuggingFace API (Header Auth) |
 | Get LinkedIn Profile | LinkedIn OAuth2 |
 | Post to LinkedIn | LinkedIn OAuth2 |
 
-5. Enable **"Ignore SSL Issues"** on the HTTP Request nodes (AI Generate, Get LinkedIn Profile, Post to LinkedIn)
+5. Enable **"Ignore SSL Issues"** on all HTTP Request nodes
 6. Click **Publish**
+7. **Activate** the workflow -- n8n starts polling every 5 minutes
 
-> **Important**: When you activate the workflow, n8n will automatically register a webhook on the `thatsmeadarsh.github.io` repo via GitHub API. You can verify this in the repo's Settings > Webhooks.
+> **Note**: On first activation, n8n stores the current commit SHA without processing it. New LinkedIn posts are created starting from the next deployment.
 
 ---
 
-## Step 8: Test the Pipeline
+## Step 6: Test the Pipeline
 
 ### Test with a Draft Post (safe -- no LinkedIn)
 
@@ -300,23 +214,19 @@ git push origin main
 ```
 
 **Expected results**:
-- GitHub Actions builds and deploys (draft won't appear on site by default)
-- Push to Pages repo triggers n8n webhook
-- n8n detects the new post, fetches markdown, parses it, detects `draft = true`, skips LinkedIn
+- GitHub Actions builds and deploys
+- Within 5 minutes, n8n detects the new commit
+- n8n fetches the markdown, parses it, detects `draft = true`, skips LinkedIn
 
 ### Test with a Real Post (publishes to LinkedIn)
 
 Change `draft = true` to `draft = false` and push a new post. Verify:
 1. Post appears on your website
-2. LinkedIn post shows up on your profile
+2. Within 5 minutes, LinkedIn post shows up on your profile
 
-### Test n8n Trigger Only (manual)
+### Test n8n Manually
 
-In the n8n workflow editor:
-1. Click the **GitHub Push Trigger** node
-2. Click **"Listen for test event"**
-3. Push a change to the `thatsmeadarsh.github.io` repo (or wait for GitHub Actions to push)
-4. n8n captures the event and runs the workflow in test mode
+In the n8n workflow editor, click **"Test Workflow"** to run a single poll cycle immediately without waiting for the schedule.
 
 ---
 
@@ -326,16 +236,14 @@ In the n8n workflow editor:
 |---|---|
 | **n8n not accessible** | `docker ps` to check container; `docker start n8n` |
 | **SSL errors in n8n** | Ensure `NODE_TLS_REJECT_UNAUTHORIZED=0` set; restart container |
-| **GitHub webhook not firing** | Check repo Settings > Webhooks; ensure tunnel is running |
-| **Webhook URL mismatch** | Set `WEBHOOK_URL` env var in Docker to your tunnel URL |
-| **n8n can't register webhook** | Check GitHub PAT has `admin:repo_hook` scope |
 | **No new posts detected** | Check that Hugo build adds files like `posts/{slug}/index.html` |
-| **Markdown fetch fails** | Check source repo is accessible; for private repos, configure auth |
+| **Markdown fetch fails** | Check source repo is accessible; for private repos, add auth to Fetch node |
 | **LinkedIn "unauthorized_scope"** | Turn OFF "Organization Support" and "Legacy" in credential |
 | **LinkedIn "unable to sign"** | Re-authorize: open credential > "Connect my account" |
 | **HuggingFace model deprecated** | Use `Meta-Llama-3.1-8B-Instruct` on `sambanova` provider |
 | **GitHub Actions fails** | Check `PERSONAL_ACCESS_TOKEN` hasn't expired |
 | **Git push rejected** | Run `git pull --rebase` in the affected repo |
+| **n8n processes same post twice** | Check workflow static data; SHA should update after each run |
 
 ---
 

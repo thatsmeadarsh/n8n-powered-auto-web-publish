@@ -1,12 +1,12 @@
 # n8n-Powered Auto Web Publish
 
-> Automated blog publishing pipeline: Write a markdown post, push to your Hugo repo, and GitHub Actions builds and deploys your site to GitHub Pages. Once deployed, n8n detects the new post via GitHub webhook, generates an AI-powered LinkedIn summary, and publishes it -- fully automated, zero manual steps.
+> Automated blog publishing pipeline: Write a markdown post, push to your Hugo repo, and GitHub Actions builds and deploys your site to GitHub Pages. n8n polls for new deployments, generates an AI-powered LinkedIn summary, and publishes it -- fully automated, zero manual steps.
 
 ---
 
 ## The Integration Story
 
-This project demonstrates how **n8n workflow automation** and **GitHub Actions CI/CD** can be integrated to create a **zero-touch publishing pipeline**. A single `git push` triggers two sequential systems -- GitHub Actions for building and deploying the website, then n8n for AI-powered social media promotion -- without any manual intervention.
+This project demonstrates how **n8n workflow automation** and **GitHub Actions CI/CD** can be integrated to create a **zero-touch publishing pipeline**. A single `git push` triggers GitHub Actions for building and deploying the website, then n8n detects the deployment and handles AI-powered social media promotion -- without any manual intervention.
 
 ```mermaid
 graph TB
@@ -20,12 +20,12 @@ graph TB
     end
 
     subgraph Pipeline2["Pipeline 2: n8n Workflow"]
-        E["Detect -> Fetch -> AI Generate -> LinkedIn Publish"]
+        E["Poll -> Detect -> Fetch -> AI Generate -> LinkedIn Publish"]
         F["LinkedIn Post"]
     end
 
     A -->|"git push"| C --> D
-    D -->|"GitHub webhook"| E --> F
+    D -->|"n8n polls GitHub API"| E --> F
 
     style Event fill:#ffcc66,stroke:#333
     style D fill:#99ff99,stroke:#333
@@ -37,7 +37,7 @@ graph TB
 1. **Write** a new markdown post in your Hugo project's `content/posts/` directory
 2. **Commit and push** to the Hugo repo's `main` branch
 3. **GitHub Actions** (auto-triggered by push) builds the Hugo site and deploys to GitHub Pages
-4. **GitHub webhook** notifies n8n when the Pages repo receives the deployed content
+4. **n8n** polls the Pages repo every 5 minutes, detects the new deployment commit
 5. **n8n** extracts the new post slug, fetches the original markdown from the Hugo source repo
 6. **Hugging Face AI** (Meta-Llama 3.1 via SambaNova) generates a compelling LinkedIn summary
 7. **LinkedIn API** publishes the AI-crafted post with an article link to your profile
@@ -49,7 +49,7 @@ graph TB
 | Document | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | High-level and low-level architecture, PlantUML system flows, integration patterns |
-| [Setup Guide](docs/setup-guide.md) | Step-by-step setup for n8n, GitHub, credentials, and webhook configuration |
+| [Setup Guide](docs/setup-guide.md) | Step-by-step setup for n8n, GitHub, and credentials |
 | [Workflow Documentation](docs/workflow-documentation.md) | Node-by-node n8n workflow docs, GitHub Actions pipeline details |
 
 ## Quick Start
@@ -64,17 +64,13 @@ docker run -d --name n8n --restart unless-stopped \
   -p 5678:5678 \
   -v n8n_data:/home/node/.n8n \
   -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
-  -e WEBHOOK_URL=https://your-tunnel-url.ngrok-free.app \
   docker.n8n.io/n8nio/n8n
 
-# 3. Expose n8n via tunnel (required for GitHub webhooks)
-ngrok http 5678
-
-# 4. Import the workflow in n8n UI (http://localhost:5678)
+# 3. Import the workflow in n8n UI (http://localhost:5678)
 # Import: workflows/auto-publish-workflow.json
 # Configure credentials: GitHub API, HuggingFace Header Auth, LinkedIn OAuth2
 
-# 5. Activate the workflow -- n8n auto-registers the GitHub webhook
+# 4. Activate the workflow -- n8n starts polling every 5 minutes
 ```
 
 ## Project Structure
@@ -98,8 +94,7 @@ n8n-powered-auto-web-publish/
 | Component | Runs On | Responsibility |
 |---|---|---|
 | **GitHub Actions** | GitHub Cloud | Hugo build, cross-repo deploy to GitHub Pages |
-| **GitHub Webhook** | GitHub Cloud | Notifies n8n when Pages repo receives a push |
-| **n8n** | Docker (local + tunnel) | Detect new posts, fetch content, AI generation, LinkedIn publishing |
+| **n8n** | Docker (local) | Poll for deployments, fetch content, AI generation, LinkedIn publishing |
 | **Hugging Face** | Cloud API | Text generation (Meta-Llama 3.1 via SambaNova) |
 | **LinkedIn** | Cloud API | Social media posting (OAuth2) |
 
@@ -107,12 +102,11 @@ n8n-powered-auto-web-publish/
 
 - **n8n** (v2.11+) -- Workflow automation engine (Docker)
 - **GitHub Actions** -- CI/CD pipeline for Hugo build + deploy
-- **GitHub Webhooks** -- Event-driven notification to n8n
+- **GitHub API** -- Polled by n8n to detect new deployments
 - **Hugo** -- Static site generator (Ananke theme)
 - **GitHub Pages** -- Static site hosting
 - **Hugging Face Inference API** -- AI text generation
 - **LinkedIn API** -- Social media posting (OAuth2)
-- **ngrok / Cloudflare Tunnel** -- Expose local n8n to GitHub webhooks
 
 ---
 
