@@ -41,7 +41,7 @@
       "name": "Fetch Latest Deployment",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [480, 300],
+      "position": [480, 300]
     },
     {
       "parameters": {
@@ -140,7 +140,7 @@
       "name": "AI Generate LinkedIn Post",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1860, 200],
+      "position": [1860, 200]
     },
     {
       "parameters": {
