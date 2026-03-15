@@ -354,39 +354,38 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph Bridge["The Bridge: GitHub API Polling"]
-        FW["n8n polls commits — new commit means deployment complete"]
+    subgraph Bridge["Bridge: GitHub API Polling"]
+        FW["Poll commits for new deployment"]
     end
 
-    subgraph GitHubActions["GitHub Actions: Build and Deploy"]
+    subgraph GitHubActions["GitHub Actions"]
         direction TB
-        GA1["Triggered by git push to Hugo repo"]
-        GA2["Builds Hugo static site"]
-        GA3["Deploys to GitHub Pages"]
-        GA4["Output: Live website"]
-        GA1 --> GA2 --> GA3 --> GA4
+        GA1["git push triggers build"]
+        GA2["Hugo builds static site"]
+        GA3["Deploy to GitHub Pages"]
+        GA1 --> GA2 --> GA3
     end
 
-    subgraph n8nWF1["n8n WF1: Generate LinkedIn Draft"]
+    subgraph n8nWF1["WF1: Draft Generation"]
         direction TB
-        N1["Triggered by new commit detected via polling"]
-        N2["Fetches and parses blog content"]
-        N3["AI generates LinkedIn draft"]
-        N4["Saves draft to pendingDrafts queue"]
+        N1["Detect new commit"]
+        N2["Fetch + parse content"]
+        N3["AI generates draft"]
+        N4["Save to draft queue"]
         N1 --> N2 --> N3 --> N4
     end
 
-    subgraph n8nWF2["n8n WF2: Review & Publish"]
+    subgraph n8nWF2["WF2: Review + Publish"]
         direction TB
-        N5["Author opens form URL"]
-        N6["Form-based review with pre-filled draft"]
-        N7["Approve -> posts to LinkedIn"]
+        N5["Open review form"]
+        N6["Edit draft if needed"]
+        N7["Approve or reject"]
         N5 --> N6 --> N7
     end
 
-    GitHubActions -->|"commit to Pages repo"| Bridge
-    Bridge -->|"new commit detected"| n8nWF1
-    n8nWF1 -->|"draft saved to static data"| n8nWF2
+    GitHubActions -->|"commit"| Bridge
+    Bridge -->|"detected"| n8nWF1
+    n8nWF1 -->|"draft saved"| n8nWF2
 
     style Bridge fill:#ffcc66,stroke:#333
     style GitHubActions fill:#e6f3ff,stroke:#4a86c8
