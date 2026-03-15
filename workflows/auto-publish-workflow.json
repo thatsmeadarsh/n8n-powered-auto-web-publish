@@ -166,6 +166,19 @@
     },
     {
       "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "approve"
+        }
+      },
+      "id": "wait-for-approval",
+      "name": "Wait for Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2300, 200]
+    },
+    {
+      "parameters": {
         "method": "GET",
         "url": "https://api.linkedin.com/v2/userinfo",
         "authentication": "predefinedCredentialType",
@@ -178,7 +191,7 @@
       "name": "Get LinkedIn Profile",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2300, 200],
+      "position": [2520, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -188,13 +201,13 @@
     },
     {
       "parameters": {
-        "jsCode": "// Build LinkedIn scheduled post request body\n// Post is scheduled 24 hours ahead so the author can review,\n// edit if needed, and publish early -- or let it auto-publish.\nconst profile = $input.first().json;\nconst postData = $('Format LinkedIn Post').first().json;\n\nconst personId = profile.sub;\n\n// Schedule 24 hours from now (LinkedIn expects Unix ms timestamp)\nconst scheduledPublishTime = Date.now() + (24 * 60 * 60 * 1000);\n\nconst linkedinBody = {\n  author: `urn:li:person:${personId}`,\n  lifecycleState: 'SCHEDULED',\n  scheduledPublishTime,\n  specificContent: {\n    'com.linkedin.ugc.ShareContent': {\n      shareCommentary: {\n        text: postData.linkedinText\n      },\n      shareMediaCategory: 'ARTICLE',\n      media: [\n        {\n          status: 'READY',\n          originalUrl: postData.postUrl,\n          title: {\n            text: postData.title\n          }\n        }\n      ]\n    }\n  },\n  visibility: {\n    'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'\n  }\n};\n\nreturn [{\n  json: {\n    linkedinBody,\n    scheduledPublishTime: new Date(scheduledPublishTime).toISOString()\n  }\n}];"
+        "jsCode": "// Build LinkedIn publish request body\nconst profile = $input.first().json;\nconst postData = $('Format LinkedIn Post').first().json;\n\nconst personId = profile.sub;\n\nconst linkedinBody = {\n  author: `urn:li:person:${personId}`,\n  lifecycleState: 'PUBLISHED',\n  specificContent: {\n    'com.linkedin.ugc.ShareContent': {\n      shareCommentary: {\n        text: postData.linkedinText\n      },\n      shareMediaCategory: 'ARTICLE',\n      media: [\n        {\n          status: 'READY',\n          originalUrl: postData.postUrl,\n          title: {\n            text: postData.title\n          }\n        }\n      ]\n    }\n  },\n  visibility: {\n    'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'\n  }\n};\n\nreturn [{\n  json: {\n    linkedinBody\n  }\n}];"
       },
       "id": "prepare-linkedin-post",
       "name": "Prepare LinkedIn Post",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2520, 200]
+      "position": [2740, 200]
     },
     {
       "parameters": {
@@ -213,7 +226,7 @@
       "name": "Post to LinkedIn",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2740, 200],
+      "position": [2960, 200],
       "credentials": {
         "linkedInOAuth2Api": {
           "id": "CONFIGURE_ME",
@@ -327,6 +340,17 @@
       ]
     },
     "Format LinkedIn Post": {
+      "main": [
+        [
+          {
+            "node": "Wait for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Approval": {
       "main": [
         [
           {
