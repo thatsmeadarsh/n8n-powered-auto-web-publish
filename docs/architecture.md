@@ -325,7 +325,7 @@ graph TB
 | **Deployment guarantee** | n8n only fires after a new commit appears on the Pages repo, meaning deployment is complete. |
 | **No host dependencies** | No file watcher, no tunnels, no background processes. Just `git push` and Docker. |
 | **Fault isolation** | If LinkedIn posting fails, the website is still live. If GitHub Actions fails, n8n sees no new commit. |
-| **Zero manual steps** | From pushing a markdown file to a live website + LinkedIn announcement -- no human intervention. |
+| **One intentional manual step** | After `git push`, everything runs automatically up to the LinkedIn approval gate. The author reviews and resumes the waiting execution in n8n before the post goes live -- by design, not by accident. |
 | **Corporate-friendly** | Polling uses outbound HTTPS only -- works behind corporate proxies and firewalls. |
 
 ---
