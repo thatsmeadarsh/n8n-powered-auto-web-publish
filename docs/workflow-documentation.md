@@ -140,9 +140,9 @@ Fetches the latest commit on the Pages repo's `main` branch. The response includ
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Detect new deployments and extract blog post slugs |
+| **Purpose** | Detect new deployments, extract blog post slugs, and construct post URLs |
 
-**State Management**: Uses `$getWorkflowStaticData('global')` to persist the last processed commit SHA between executions.
+**State Management**: Uses `$getWorkflowStaticData('global')` to persist the last processed commit SHA between executions. This SHA survives n8n restarts and persists in the `n8n_data` Docker volume.
 
 **Logic**:
 
@@ -166,6 +166,42 @@ graph TD
 1. Same commit as last poll -- no new deployment
 2. First run -- stores initial SHA without processing
 3. New commit but no new post files -- deployment only changed CSS/JS/etc.
+
+**How post URLs are constructed**:
+
+Hugo's build output mirrors the source structure exactly. A markdown file at `content/posts/my-post.md` in the source repo always produces `posts/my-post/index.html` in the Pages repo. This makes URL construction deterministic:
+
+```
+GitHub Pages commit files[]
+        │
+        │  file.filename = "posts/my-new-post/index.html"
+        │  file.status   = "added"
+        │
+        ▼
+Regex: /^posts\/([^\/]+)\/index\.html$/
+        │
+        │  match[1] = "my-new-post"   ← the slug
+        │
+        ▼
+Post URL = "https://thatsmeadarsh.github.io/posts/my-new-post/"
+```
+
+The slug extracted from the Pages repo file path is **identical** to the URL path used by the live website. No guessing, no configuration -- the deployed file path IS the URL.
+
+**Example**:
+
+| Source file | Pages repo file | Slug | Live URL |
+|---|---|---|---|
+| `content/posts/building-auto-publish.md` | `posts/building-auto-publish/index.html` | `building-auto-publish` | `https://thatsmeadarsh.github.io/posts/building-auto-publish/` |
+| `content/posts/n8n-linkedin-ai.md` | `posts/n8n-linkedin-ai/index.html` | `n8n-linkedin-ai` | `https://thatsmeadarsh.github.io/posts/n8n-linkedin-ai/` |
+
+**Output per post**:
+```json
+{
+  "slug": "building-auto-publish",
+  "postUrl": "https://thatsmeadarsh.github.io/posts/building-auto-publish/"
+}
+```
 
 ---
 
@@ -283,7 +319,42 @@ Returns the `sub` field -- the person URN ID.
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Build LinkedIn UGC Post API body |
+| **Purpose** | Build LinkedIn UGC Post API body as a **scheduled post** |
+
+Creates a scheduled post set to publish **24 hours from the time of execution**. This gives you a review window to edit or publish early from LinkedIn's UI before it auto-publishes.
+
+**Scheduled post body**:
+```json
+{
+  "author": "urn:li:person:{personId}",
+  "lifecycleState": "SCHEDULED",
+  "scheduledPublishTime": 1234567890000,
+  "specificContent": {
+    "com.linkedin.ugc.ShareContent": {
+      "shareCommentary": { "text": "AI-generated post text..." },
+      "shareMediaCategory": "ARTICLE",
+      "media": [{
+        "status": "READY",
+        "originalUrl": "https://thatsmeadarsh.github.io/posts/my-post/",
+        "title": { "text": "Post Title" }
+      }]
+    }
+  },
+  "visibility": {
+    "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+  }
+}
+```
+
+**`scheduledPublishTime`** is a Unix timestamp in milliseconds: `Date.now() + (24 * 60 * 60 * 1000)`.
+
+**How to review and publish from LinkedIn**:
+
+1. Open **LinkedIn** (web or mobile)
+2. Go to **Me** → **Posts & Activity** → **Scheduled**
+3. Find the scheduled post (shows with the article link preview)
+4. Click **Edit** to modify the text if needed
+5. Click **Post now** to publish immediately, or leave it to auto-publish in 24 hours
 
 ---
 
@@ -295,6 +366,8 @@ Returns the `sub` field -- the person URN ID.
 | **Method** | POST |
 | **URL** | `https://api.linkedin.com/v2/ugcPosts` |
 | **Auth** | LinkedIn OAuth2 |
+
+Creates the scheduled post. Returns the post URN on success (e.g., `urn:li:ugcPost:1234567890`).
 
 ---
 
