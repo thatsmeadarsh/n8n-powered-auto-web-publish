@@ -42,12 +42,6 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [480, 300],
-      "credentials": {
-        "githubApi": {
-          "id": "CONFIGURE_ME",
-          "name": "GitHub API"
-        }
-      }
     },
     {
       "parameters": {
@@ -147,12 +141,6 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1860, 200],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "CONFIGURE_ME",
-          "name": "HuggingFace API"
-        }
-      }
     },
     {
       "parameters": {
@@ -191,13 +179,7 @@
       "name": "Get LinkedIn Profile",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2520, 200],
-      "credentials": {
-        "linkedInOAuth2Api": {
-          "id": "CONFIGURE_ME",
-          "name": "LinkedIn account"
-        }
-      }
+      "position": [2520, 200]
     },
     {
       "parameters": {
@@ -226,13 +208,7 @@
       "name": "Post to LinkedIn",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2960, 200],
-      "credentials": {
-        "linkedInOAuth2Api": {
-          "id": "CONFIGURE_ME",
-          "name": "LinkedIn account"
-        }
-      }
+      "position": [2960, 200]
     },
     {
       "parameters": {},
