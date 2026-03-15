@@ -1,5 +1,5 @@
 {
-  "name": "Auto Publish Blog to LinkedIn",
+  "name": "Generate LinkedIn Draft",
   "nodes": [
     {
       "parameters": {
@@ -144,71 +144,13 @@
     },
     {
       "parameters": {
-        "jsCode": "// Extract the AI-generated LinkedIn post text from HF response\nconst hfResponse = $input.first().json;\nconst prevData = $('Prepare HF Request').first().json;\n\nlet linkedinText = '';\n\nif (hfResponse.choices && hfResponse.choices.length > 0) {\n  linkedinText = hfResponse.choices[0].message.content.trim();\n} else if (hfResponse[0] && hfResponse[0].generated_text) {\n  linkedinText = hfResponse[0].generated_text.trim();\n} else {\n  // Fallback: generate a simple post\n  const hashtags = prevData.tags.slice(0, 3).map(t => '#' + t.replace(/\\s+/g, '')).join(' ');\n  linkedinText = `New blog post: \"${prevData.title}\"\\n\\nCheck it out here: ${prevData.postUrl}\\n\\n${hashtags}`;\n}\n\nreturn [{\n  json: {\n    ...prevData,\n    linkedinText\n  }\n}];"
+        "jsCode": "// Extract AI-generated text and save as pending draft in static data\nconst hfResponse = $input.first().json;\nconst prevData = $('Prepare HF Request').first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nlet linkedinText = '';\n\nif (hfResponse.choices && hfResponse.choices.length > 0) {\n  linkedinText = hfResponse.choices[0].message.content.trim();\n} else if (hfResponse[0] && hfResponse[0].generated_text) {\n  linkedinText = hfResponse[0].generated_text.trim();\n} else {\n  const hashtags = prevData.tags.slice(0, 3).map(t => '#' + t.replace(/\\s+/g, '')).join(' ');\n  linkedinText = `New blog post: \"${prevData.title}\"\\n\\nCheck it out here: ${prevData.postUrl}\\n\\n${hashtags}`;\n}\n\n// Save draft to static data for the review workflow to pick up\nconst draft = {\n  title: prevData.title,\n  postUrl: prevData.postUrl,\n  linkedinText: linkedinText,\n  slug: prevData.slug,\n  createdAt: new Date().toISOString()\n};\n\n// Append to pending drafts queue\nif (!staticData.pendingDrafts) {\n  staticData.pendingDrafts = [];\n}\nstaticData.pendingDrafts.push(draft);\n\nreturn [{\n  json: {\n    status: 'draft_saved',\n    ...draft\n  }\n}];"
       },
-      "id": "format-linkedin",
-      "name": "Format LinkedIn Post",
+      "id": "save-draft",
+      "name": "Save Draft for Review",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [2080, 200]
-    },
-    {
-      "parameters": {
-        "resume": "webhook",
-        "options": {
-          "webhookSuffix": "approve"
-        }
-      },
-      "id": "wait-for-approval",
-      "name": "Wait for Approval",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [2300, 200]
-    },
-    {
-      "parameters": {
-        "method": "GET",
-        "url": "https://api.linkedin.com/v2/userinfo",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "linkedInOAuth2Api",
-        "options": {
-          "allowUnauthorizedCerts": true
-        }
-      },
-      "id": "get-linkedin-profile",
-      "name": "Get LinkedIn Profile",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2520, 200]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Build LinkedIn publish request body\nconst profile = $input.first().json;\nconst postData = $('Format LinkedIn Post').first().json;\n\nconst personId = profile.sub;\n\nconst linkedinBody = {\n  author: `urn:li:person:${personId}`,\n  lifecycleState: 'PUBLISHED',\n  specificContent: {\n    'com.linkedin.ugc.ShareContent': {\n      shareCommentary: {\n        text: postData.linkedinText\n      },\n      shareMediaCategory: 'ARTICLE',\n      media: [\n        {\n          status: 'READY',\n          originalUrl: postData.postUrl,\n          title: {\n            text: postData.title\n          }\n        }\n      ]\n    }\n  },\n  visibility: {\n    'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'\n  }\n};\n\nreturn [{\n  json: {\n    linkedinBody\n  }\n}];"
-      },
-      "id": "prepare-linkedin-post",
-      "name": "Prepare LinkedIn Post",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2740, 200]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://api.linkedin.com/v2/ugcPosts",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "linkedInOAuth2Api",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.linkedinBody) }}",
-        "options": {
-          "allowUnauthorizedCerts": true
-        }
-      },
-      "id": "post-to-linkedin",
-      "name": "Post to LinkedIn",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2960, 200]
     },
     {
       "parameters": {},
@@ -308,51 +250,7 @@
       "main": [
         [
           {
-            "node": "Format LinkedIn Post",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Format LinkedIn Post": {
-      "main": [
-        [
-          {
-            "node": "Wait for Approval",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Wait for Approval": {
-      "main": [
-        [
-          {
-            "node": "Get LinkedIn Profile",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get LinkedIn Profile": {
-      "main": [
-        [
-          {
-            "node": "Prepare LinkedIn Post",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare LinkedIn Post": {
-      "main": [
-        [
-          {
-            "node": "Post to LinkedIn",
+            "node": "Save Draft for Review",
             "type": "main",
             "index": 0
           }
@@ -363,12 +261,5 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "tags": [
-    {
-      "name": "automation"
-    },
-    {
-      "name": "blog"
-    }
-  ]
+  "tags": ["automation", "blog"]
 }

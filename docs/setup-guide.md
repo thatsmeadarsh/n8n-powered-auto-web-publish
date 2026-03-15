@@ -25,6 +25,7 @@ graph LR
         HF[Hugging Face]
         LI[LinkedIn Developer]
         GH[GitHub PAT]
+        N8N[n8n API Key]
     end
 
     style Required fill:#99ff99,stroke:#333
@@ -166,29 +167,62 @@ Then add it to your Hugo repo:
    - Legacy: **OFF**
 6. Click **"Connect my account"** and authorize
 
+### 4d: n8n Internal API Key
+
+WF2 uses the n8n REST API to read and update WF1's draft queue. This requires an API key.
+
+1. Open n8n at `http://localhost:5678`
+2. Go to **Settings** (gear icon) > **n8n API**
+3. Click **"Create an API Key"**
+4. Copy the generated API key
+5. Go to **Overview** > **Credentials** > **Add Credential**
+6. Search for **"Header Auth"**
+7. Fill in:
+   - **Name**: `X-N8N-API-KEY`
+   - **Value**: your API key
+8. Save as **"n8n Internal API"**
+
 ---
 
-## Step 5: Import the n8n Workflow
+## Step 5: Import the n8n Workflows
+
+### 5a: Import WF1 — Generate LinkedIn Draft
 
 1. Open n8n at `http://localhost:5678`
 2. Go to **Workflows** > **"..."** > **"Import from File"**
 3. Select `workflows/auto-publish-workflow.json`
-4. Assign credentials to each node:
+4. Assign credentials:
 
 | Node | Credential |
 |---|---|
 | Fetch Latest Deployment | GitHub API |
 | AI Generate LinkedIn Post | HuggingFace API (Header Auth) |
+
+5. Enable **"Ignore SSL Issues"** on all HTTP Request nodes
+6. Click **Publish** and **Activate**
+
+### 5b: Import WF2 — Review & Publish to LinkedIn
+
+1. Go to **Workflows** > **"..."** > **"Import from File"**
+2. Select `workflows/review-and-publish-workflow.json`
+3. Assign credentials:
+
+| Node | Credential |
+|---|---|
+| Fetch Draft from WF1 | n8n Internal API (Header Auth) |
+| Fetch Draft for Cleanup | n8n Internal API (Header Auth) |
+| Remove Draft from Queue | n8n Internal API (Header Auth) |
 | Get LinkedIn Profile | LinkedIn OAuth2 |
 | Post to LinkedIn | LinkedIn OAuth2 |
 
+4. **Update WF1 ID**: In the "Fetch Draft from WF1", "Fetch Draft for Cleanup", and "Remove Draft from Queue" nodes, update the URL to use your WF1's workflow ID. You can find the ID in the WF1 URL bar (e.g., `http://localhost:5678/workflow/XXXX`).
 5. Enable **"Ignore SSL Issues"** on all HTTP Request nodes
-6. Click **Publish**
-7. **Activate** the workflow -- n8n starts polling every 5 minutes
+6. Click **Publish** and **Activate**
 
-> **Note**: On first activation, n8n stores the current commit SHA without processing it. New LinkedIn posts are created starting from the next deployment.
+> **Note**: WF1 runs on a 5-minute schedule. On first activation, it stores the current commit SHA without processing. WF2 is always active, waiting for form submissions.
 
-> **No SMTP or email credential needed.** The review mechanism uses the n8n Wait node, not email. Approvals are done directly in the n8n UI (see Step 6).
+> **Form URL**: After activating WF2, the review form is available at:
+> `http://localhost:5678/form/linkedin-review-form`
 
 ---
 
@@ -225,14 +259,17 @@ git push origin main
 Change `draft = true` to `draft = false` and push a new post. The flow:
 
 1. GitHub Actions builds and deploys the site (~1-3 minutes)
-2. Within 5 minutes, n8n detects the new commit
-3. n8n generates the AI LinkedIn post and reaches the **Wait for Approval** node
-4. The execution pauses — open `http://localhost:5678` > **Executions** > find the **"Waiting"** execution
-5. Click the execution, expand the **Wait for Approval** node output, and copy the `resumeUrl`
-6. Open the `resumeUrl` in your browser to approve and resume
-7. n8n fetches your LinkedIn profile, builds the post body, and publishes immediately
+2. Within 5 minutes, n8n WF1 detects the new commit
+3. WF1 generates the AI LinkedIn draft and saves it to the draft queue
+4. Open the review form: `http://localhost:5678/form/linkedin-review-form`
+5. Click **"Load Latest Draft"** on page 1
+6. Page 2 shows the pre-filled draft: title, post URL, and AI-generated LinkedIn text
+7. Edit the LinkedIn text if needed
+8. Select **Approve** or **Reject** and submit
+9. On approve: WF2 publishes to LinkedIn immediately
+10. On reject: draft is removed from the queue without publishing
 
-**Editing the AI-generated post before approving**: The AI post text is visible in the **Format LinkedIn Post** node output within the waiting execution. If you want to edit it, you can modify the post directly on LinkedIn after it publishes, or stop the execution and re-trigger with a fresh push.
+**Editing the AI-generated post before approving**: The review form pre-fills the LinkedIn text in an editable field. Make any changes directly in the form before submitting your approval.
 
 ### Test n8n Manually
 
@@ -252,7 +289,9 @@ In the n8n workflow editor, click **"Test Workflow"** to run a single poll cycle
 | **LinkedIn "unauthorized_scope"** | Turn OFF "Organization Support" and "Legacy" in credential |
 | **LinkedIn "unable to sign"** | Re-authorize: open credential > "Connect my account" |
 | **LinkedIn 403 on scheduled post** | Do not use `lifecycleState: SCHEDULED` -- requires Marketing Partner access. Use `PUBLISHED` |
-| **Wait node execution not visible** | Go to n8n **Executions** tab; filter by **"Waiting"** status |
+| **Form shows empty fields** | WF1 hasn't generated a draft yet. Push a new (non-draft) blog post and wait for WF1 to run. |
+| **"No pending drafts" in form** | All drafts have been reviewed. Push a new post to generate a fresh draft. |
+| **Queue cleanup fails (405 error)** | Ensure the n8n Internal API credential uses the correct API key and WF1 ID is correct in the URL. |
 | **HuggingFace model deprecated** | Use `Meta-Llama-3.1-8B-Instruct` on `sambanova` provider |
 | **GitHub Actions fails (Node.js 16)** | Update to `actions/checkout@v4` and `peaceiris/actions-hugo@v3` |
 | **GitHub Actions "Commit public folder" fails** | Add `public/` to `.gitignore`; the runner copies `public/*` to Pages repo directly |

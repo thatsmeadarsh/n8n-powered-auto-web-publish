@@ -1,0 +1,362 @@
+{
+  "name": "Review & Publish to LinkedIn",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "LinkedIn Post Review",
+        "formDescription": "Click submit to load the latest pending draft for review.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Action",
+              "fieldType": "hidden",
+              "defaultValue": "load"
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Loading draft..."
+            }
+          }
+        }
+      },
+      "id": "form-trigger",
+      "name": "Load Draft",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.5,
+      "position": [240, 300],
+      "webhookId": "linkedin-review-form"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:5678/api/v1/workflows/87N9BAWmYAbsN5Ls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "fetch-draft",
+      "name": "Fetch Draft from WF1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the oldest pending draft (FIFO) from WF1's static data\nconst wfData = $input.first().json;\nconst staticData = typeof wfData.staticData === 'string' \n  ? JSON.parse(wfData.staticData) \n  : wfData.staticData;\n\nconst drafts = staticData?.global?.pendingDrafts || [];\n\nif (drafts.length === 0) {\n  return [{\n    json: {\n      title: '(No pending drafts)',\n      postUrl: '',\n      linkedinText: 'No drafts are pending review. Push a new blog post first.',\n      hasDraft: false,\n      queueSize: 0\n    }\n  }];\n}\n\n// FIFO: take the oldest draft (index 0)\nconst oldest = drafts[0];\n\nreturn [{\n  json: {\n    title: oldest.title,\n    postUrl: oldest.postUrl,\n    linkedinText: oldest.linkedinText,\n    slug: oldest.slug,\n    createdAt: oldest.createdAt,\n    hasDraft: true,\n    queueSize: drafts.length\n  }\n}];"
+      },
+      "id": "extract-draft",
+      "name": "Extract Latest Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Blog Post Title",
+              "fieldType": "text",
+              "requiredField": true,
+              "defaultValue": "={{ $json.title }}"
+            },
+            {
+              "fieldLabel": "Post URL",
+              "fieldType": "text",
+              "requiredField": true,
+              "defaultValue": "={{ $json.postUrl }}"
+            },
+            {
+              "fieldLabel": "LinkedIn Post Text",
+              "fieldType": "textarea",
+              "requiredField": true,
+              "defaultValue": "={{ $json.linkedinText }}"
+            },
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve"
+                  },
+                  {
+                    "option": "Reject"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "review-form",
+      "name": "Review & Edit",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "approval-check",
+              "leftValue": "={{ $json.Decision }}",
+              "rightValue": "Approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.string.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-approval",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.linkedin.com/v2/userinfo",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linkedInOAuth2Api",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "get-linkedin-profile",
+      "name": "Get LinkedIn Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build LinkedIn publish request body from form data\nconst profile = $input.first().json;\nconst formData = $('Review & Edit').first().json;\n\nconst personId = profile.sub;\nconst linkedinText = formData['LinkedIn Post Text'];\nconst postUrl = formData['Post URL'];\nconst title = formData['Blog Post Title'];\n\nconst linkedinBody = {\n  author: `urn:li:person:${personId}`,\n  lifecycleState: 'PUBLISHED',\n  specificContent: {\n    'com.linkedin.ugc.ShareContent': {\n      shareCommentary: {\n        text: linkedinText\n      },\n      shareMediaCategory: 'ARTICLE',\n      media: [\n        {\n          status: 'READY',\n          originalUrl: postUrl,\n          title: {\n            text: title\n          }\n        }\n      ]\n    }\n  },\n  visibility: {\n    'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'\n  }\n};\n\nreturn [{\n  json: {\n    linkedinBody\n  }\n}];"
+      },
+      "id": "prepare-linkedin-post",
+      "name": "Prepare LinkedIn Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/v2/ugcPosts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "linkedInOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.linkedinBody) }}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "post-to-linkedin",
+      "name": "Post to LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 200]
+    },
+    {
+      "parameters": {},
+      "id": "rejected",
+      "name": "Rejected",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1440, 420]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:5678/api/v1/workflows/87N9BAWmYAbsN5Ls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "fetch-draft-cleanup",
+      "name": "Fetch Draft for Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Remove the processed draft (index 0) from WF1's pending queue\nconst wfData = $input.first().json;\n\nconst staticData = typeof wfData.staticData === 'string'\n  ? JSON.parse(wfData.staticData)\n  : wfData.staticData;\n\nconst drafts = staticData?.global?.pendingDrafts || [];\nconst removed = drafts.shift();\n\n// Build the full workflow update body required by PUT /api/v1/workflows\nconst updateBody = {\n  name: wfData.name,\n  nodes: wfData.nodes,\n  connections: wfData.connections,\n  settings: { executionOrder: 'v1' },\n  staticData: JSON.stringify({\n    ...staticData,\n    global: {\n      ...staticData.global,\n      pendingDrafts: drafts\n    }\n  })\n};\n\nreturn [{\n  json: {\n    updateBody,\n    removedSlug: removed?.slug || 'none',\n    remainingDrafts: drafts.length\n  }\n}];"
+      },
+      "id": "prepare-cleanup",
+      "name": "Prepare Queue Cleanup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 420]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "http://localhost:5678/api/v1/workflows/87N9BAWmYAbsN5Ls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.updateBody) }}",
+        "options": {}
+      },
+      "id": "save-cleanup",
+      "name": "Remove Draft from Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 560]
+    }
+  ],
+  "connections": {
+    "Load Draft": {
+      "main": [
+        [
+          {
+            "node": "Fetch Draft from WF1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Draft from WF1": {
+      "main": [
+        [
+          {
+            "node": "Extract Latest Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Latest Draft": {
+      "main": [
+        [
+          {
+            "node": "Review & Edit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review & Edit": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Get LinkedIn Profile",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get LinkedIn Profile": {
+      "main": [
+        [
+          {
+            "node": "Prepare LinkedIn Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare LinkedIn Post": {
+      "main": [
+        [
+          {
+            "node": "Post to LinkedIn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to LinkedIn": {
+      "main": [
+        [
+          {
+            "node": "Fetch Draft for Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rejected": {
+      "main": [
+        [
+          {
+            "node": "Fetch Draft for Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Draft for Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Prepare Queue Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Queue Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Remove Draft from Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": ["automation", "blog"]
+}

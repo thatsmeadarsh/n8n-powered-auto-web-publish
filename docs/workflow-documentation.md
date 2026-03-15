@@ -1,24 +1,29 @@
 # Workflow Documentation
 
-> Detailed functional documentation of the GitHub Actions pipeline and every node in the n8n workflow -- the two systems that power zero-touch blog publishing.
+> Detailed functional documentation of the GitHub Actions pipeline and the two n8n workflows -- the three systems that power blog publishing with one intentional approval step.
 
 ---
 
 ## System Overview
 
-The auto-publish pipeline consists of two systems triggered sequentially:
+The auto-publish pipeline consists of three systems triggered sequentially:
 
 ```mermaid
 graph TD
     E["Event: git push to Hugo repo"] --> GA["GitHub Actions"]
     GA -->|"deploy"| SITE["Live Website"]
     GA -->|"commit to Pages repo"| POLL["n8n polls GitHub API"]
-    POLL --> N8N["n8n Workflow"]
-    N8N --> LI["LinkedIn Post"]
+    POLL --> WF1["n8n WF1: Generate LinkedIn Draft"]
+    WF1 -->|"saves draft to queue"| QUEUE["pendingDrafts (static data)"]
+    QUEUE -->|"author opens form"| WF2["n8n WF2: Review & Publish"]
+    WF2 -->|"approved"| LI["LinkedIn Post"]
+    WF2 -->|"rejected"| SKIP["Draft discarded"]
 
     style E fill:#ffcc66,stroke:#333
     style SITE fill:#99ff99,stroke:#333
     style LI fill:#99ff99,stroke:#333
+    style QUEUE fill:#ccccff,stroke:#333
+    style SKIP fill:#ff9999,stroke:#333
 ```
 
 ---
@@ -90,22 +95,24 @@ graph TD
 
 ---
 
-## Part 2: n8n Workflow
+## Part 2: n8n Workflow 1 -- Generate LinkedIn Draft
 
 **File**: `workflows/auto-publish-workflow.json`
 **Trigger**: Schedule (every 5 minutes)
-**Total Nodes**: 14 (13 active + 1 no-op)
+**Total Nodes**: 10 (9 active + 1 no-op)
 
 ### Workflow Canvas
 
 ```
-Poll Every  -> Fetch     -> Extract    -> Fetch    -> Parse     -> Is Not  -> Prepare  -> AI Generate -> Format   -> Wait for  -> Get       -> Prepare  -> Post to
-5 Minutes     Latest       New Post      Post       Front       Draft?     HF          LinkedIn       LinkedIn    Approval      LinkedIn     LinkedIn    LinkedIn
-              Deployment   Slugs         Markdown   matter                 Request      Post           Post        (n8n UI)    Profile      Post
+Poll Every  -> Fetch     -> Extract    -> Fetch    -> Parse     -> Is Not  -> Prepare  -> AI Generate -> Save Draft
+5 Minutes     Latest       New Post      Post       Front       Draft?     HF          LinkedIn        for Review
+              Deployment   Slugs         Markdown   matter                 Request      Post
                                                                   |
                                                                   v
                                                               Skip (Draft)
 ```
+
+![WF1: Generate LinkedIn Draft](../screenshots/generate-linkedin-draft-n8n.png)
 
 ### Node-by-Node Documentation
 
@@ -295,44 +302,157 @@ categories = ['Technology', 'Software Engineering']
 
 ---
 
-#### Node 9: Format LinkedIn Post
+#### Node 9: Save Draft for Review
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Extract AI text with fallback handling |
+| **Purpose** | Save the AI-generated draft to a FIFO queue in workflow static data |
 
-Tries `choices[0].message.content`, falls back to `[0].generated_text`, then to a simple title + URL + hashtags post.
+This node bridges WF1 and WF2. Instead of publishing immediately, it stores the draft in `$getWorkflowStaticData('global').pendingDrafts` -- an array that acts as a FIFO queue. WF2 reads from and cleans up this queue via the n8n internal API.
+
+**Logic**:
+1. Extracts AI text from the HuggingFace response (tries `choices[0].message.content`, then `[0].generated_text`, then falls back to a simple title + URL + hashtags post)
+2. Builds a draft object with all data needed for review and publishing
+3. Pushes the draft onto the `pendingDrafts` array
+
+**Draft object schema**:
+```json
+{
+  "title": "My Blog Post Title",
+  "postUrl": "https://thatsmeadarsh.github.io/posts/my-post/",
+  "linkedinText": "AI-generated LinkedIn post text...",
+  "slug": "my-post",
+  "createdAt": "2026-03-15T10:00:00.000Z"
+}
+```
+
+**Why static data?** The `pendingDrafts` array persists across workflow executions and n8n restarts (stored in the `n8n_data` Docker volume). It provides a lightweight inter-workflow communication channel without requiring an external database.
 
 ---
 
-#### Node 10: Wait for Approval
+#### Node 10: Skip (Draft)
 
 | Property | Value |
 |---|---|
-| **Type** | `n8n-nodes-base.wait` |
-| **Resume** | `webhook` |
-| **Webhook Suffix** | `approve` |
-
-Pauses the workflow execution and waits for a manual approval signal before proceeding to publish on LinkedIn. The execution remains in a **"Waiting"** state visible in the n8n UI.
-
-**Why this exists**: LinkedIn's `lifecycleState: SCHEDULED` API requires Marketing Partner access and is rejected for standard developer apps. Instead of posting immediately (which bypasses review), the workflow pauses here to allow the author to review and edit the AI-generated post before it goes live.
-
-**How to approve and publish**:
-
-1. Open n8n at `http://localhost:5678`
-2. Go to **Executions** (left sidebar)
-3. Find the execution in **"Waiting"** state
-4. Click on it to open the execution detail
-5. In the **Wait for Approval** node, copy the `resumeUrl` from the node output
-6. Open the `resumeUrl` in your browser to resume the execution
-7. The workflow continues: fetches your LinkedIn profile, builds the post body, and publishes
-
-> **Tip**: The execution will wait indefinitely until resumed or manually stopped. If you decide not to post, click **"Stop"** on the waiting execution.
+| **Type** | `n8n-nodes-base.noOp` |
+| **Purpose** | Terminal node for draft posts (false branch of Is Not Draft?) |
 
 ---
 
-#### Node 11: Get LinkedIn Profile
+## Part 3: n8n Workflow 2 -- Review & Publish to LinkedIn
+
+**File**: `workflows/review-and-publish-workflow.json`
+**Trigger**: Form submission at `http://localhost:5678/form/linkedin-review-form`
+**Total Nodes**: 12
+
+This workflow provides a browser-based review form for the author to approve, edit, or reject AI-generated LinkedIn drafts before publishing.
+
+### Workflow Canvas
+
+```
+Load Draft -> Fetch Draft -> Extract   -> Review  -> Approved? -> Get       -> Prepare  -> Post to
+(Form         from WF1       Latest      & Edit                  LinkedIn     LinkedIn    LinkedIn
+ Trigger)                    Draft       (Form)        |          Profile      Post
+                                                       v
+                                                    Rejected
+                                                       |
+                                                       v
+                                         (both branches converge)
+                                                       |
+                                                       v
+                                         Fetch Draft -> Prepare  -> Remove Draft
+                                         for Cleanup    Queue       from Queue
+                                                        Cleanup
+```
+
+![WF2: Review & Publish to LinkedIn](../screenshots/review-and-publish-linkedin-n8n.png)
+
+### Cross-Workflow Communication
+
+WF2 communicates with WF1 through the n8n internal API:
+
+```mermaid
+graph LR
+    WF1["WF1 Static Data"] -->|"GET /api/v1/workflows/{id}"| READ["WF2 reads pendingDrafts[0]"]
+    READ -->|"Form pre-fill"| FORM["Author reviews draft"]
+    FORM -->|"PUT /api/v1/workflows/{id}"| CLEAN["WF2 removes draft from queue"]
+
+    style WF1 fill:#ccccff,stroke:#333
+    style FORM fill:#ffcc66,stroke:#333
+```
+
+**Authentication**: WF2 uses an n8n API key (passed via Header Auth) to read and write WF1's workflow data. This key is configured in n8n Settings > API.
+
+### Node-by-Node Documentation
+
+---
+
+#### Node 1: Load Draft
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.formTrigger` |
+| **Form Path** | `linkedin-review-form` |
+| **Page** | Page 1 -- submit button "Load Latest Draft" |
+
+The entry point for the review flow. The author navigates to `http://localhost:5678/form/linkedin-review-form` and clicks "Load Latest Draft" to fetch the oldest pending draft from WF1's queue.
+
+---
+
+#### Node 2: Fetch Draft from WF1
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | GET |
+| **URL** | `http://localhost:5678/api/v1/workflows/{wf1_id}` |
+| **Auth** | Header Auth (n8n API key) |
+
+Reads WF1's full workflow definition, including its `staticData` field which contains the `pendingDrafts` array.
+
+---
+
+#### Node 3: Extract Latest Draft
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.code` (JavaScript) |
+| **Purpose** | Read the oldest draft from WF1's pendingDrafts queue (FIFO) |
+
+Parses `staticData` from WF1's workflow JSON and reads `pendingDrafts[0]` -- the oldest unreviewed draft. If the queue is empty, returns a message indicating no drafts are available.
+
+---
+
+#### Node 4: Review & Edit
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.form` |
+| **Page** | Page 2 -- editable form fields |
+
+Displays a form pre-filled with the draft data using `defaultValue` expressions:
+- **Title** (read-only): `{{ $json.title }}`
+- **Post URL** (read-only): `{{ $json.postUrl }}`
+- **LinkedIn Text** (editable textarea): `{{ $json.linkedinText }}`
+- **Approval** (dropdown): Approve / Reject
+
+The author can edit the AI-generated LinkedIn text before approving, or reject the draft entirely.
+
+---
+
+#### Node 5: Approved?
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.if` |
+| **Condition** | Checks the form's approval field value |
+| **True** | Continue to LinkedIn publishing |
+| **False** | Rejected (NoOp) |
+
+---
+
+#### Node 6: Get LinkedIn Profile
 
 | Property | Value |
 |---|---|
@@ -341,18 +461,18 @@ Pauses the workflow execution and waits for a manual approval signal before proc
 | **URL** | `https://api.linkedin.com/v2/userinfo` |
 | **Auth** | LinkedIn OAuth2 |
 
-Returns the `sub` field -- the person URN ID.
+Returns the `sub` field -- the person URN ID needed for posting.
 
 ---
 
-#### Node 12: Prepare LinkedIn Post
+#### Node 7: Prepare LinkedIn Post
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
 | **Purpose** | Build LinkedIn UGC Post API body for immediate publishing |
 
-Builds the request body for `POST /v2/ugcPosts`. The post is published immediately (`lifecycleState: PUBLISHED`) since the review window is handled by the Wait for Approval node upstream.
+Builds the request body for `POST /v2/ugcPosts` using the (potentially edited) LinkedIn text from the form and the person URN from the previous node.
 
 **Note**: `lifecycleState: SCHEDULED` with `scheduledPublishTime` requires LinkedIn Marketing Partner access and returns a 403 for standard developer apps. Do not use `SCHEDULED`.
 
@@ -363,7 +483,7 @@ Builds the request body for `POST /v2/ugcPosts`. The post is published immediate
   "lifecycleState": "PUBLISHED",
   "specificContent": {
     "com.linkedin.ugc.ShareContent": {
-      "shareCommentary": { "text": "AI-generated post text..." },
+      "shareCommentary": { "text": "Reviewed post text..." },
       "shareMediaCategory": "ARTICLE",
       "media": [{
         "status": "READY",
@@ -382,7 +502,7 @@ LinkedIn crawls the `originalUrl` to generate the article card preview. Since n8
 
 ---
 
-#### Node 13: Post to LinkedIn
+#### Node 8: Post to LinkedIn
 
 | Property | Value |
 |---|---|
@@ -395,12 +515,51 @@ Creates and immediately publishes the post. Returns the post URN on success (e.g
 
 ---
 
-#### Node 14: Skip (Draft)
+#### Node 9: Rejected
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.noOp` |
-| **Purpose** | Terminal node for draft posts |
+| **Purpose** | Terminal node for the rejection branch |
+
+---
+
+#### Node 10: Fetch Draft for Cleanup
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | GET |
+| **URL** | `http://localhost:5678/api/v1/workflows/{wf1_id}` |
+| **Auth** | Header Auth (n8n API key) |
+
+Both the approved and rejected branches converge here. Re-fetches WF1's workflow data to get a fresh copy of the `pendingDrafts` array before modifying it.
+
+**Why re-fetch?** WF1 may have added new drafts to the queue while the author was reviewing. A fresh read ensures no drafts are lost during cleanup.
+
+---
+
+#### Node 11: Prepare Queue Cleanup
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.code` (JavaScript) |
+| **Purpose** | Remove the oldest draft from the pendingDrafts queue and build a PUT body |
+
+Removes `pendingDrafts[0]` (the draft that was just reviewed) from the array and constructs the full workflow JSON body needed for the PUT request to update WF1's static data.
+
+---
+
+#### Node 12: Remove Draft from Queue
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.httpRequest` |
+| **Method** | PUT |
+| **URL** | `http://localhost:5678/api/v1/workflows/{wf1_id}` |
+| **Auth** | Header Auth (n8n API key) |
+
+Updates WF1's workflow definition with the modified `staticData` (one fewer draft in the queue). This ensures the same draft is not presented again on the next form submission.
 
 ---
 
@@ -413,18 +572,23 @@ graph TD
         AE2["Cross-repo push fails"] --> AA2["Check PAT expiry"]
     end
 
-    subgraph n8n["n8n Workflow Errors"]
+    subgraph WF1Errors["WF1: Generate LinkedIn Draft Errors"]
         NE1["GitHub API unreachable"] --> NA1["Poll fails<br/>Retries next cycle"]
         NE2["No new posts in commit"] --> NA2["Workflow stops cleanly"]
         NE3["Markdown fetch fails"] --> NA3["Workflow errors<br/>Check repo access"]
         NE4["HuggingFace API fails"] --> NA4["Fallback post generated"]
-        NE5["LinkedIn API fails"] --> NA5["Check OAuth refresh"]
         NE6["Draft post detected"] --> NA6["Skip node"]
-        NE7["Wait node not approved"] --> NA7["Execution stays Waiting<br/>Stop manually if not posting"]
+    end
+
+    subgraph WF2Errors["WF2: Review & Publish Errors"]
+        NE7["Form shows no drafts"] --> NA7["WF1 hasn't run yet<br/>or no new posts detected"]
+        NE8["Queue cleanup fails"] --> NA8["Check n8n API key<br/>Ensure WF1 ID is correct"]
+        NE5["LinkedIn API fails"] --> NA5["Check OAuth refresh"]
     end
 
     style NA4 fill:#ffcc66,stroke:#333
     style AA2 fill:#ff9999,stroke:#333
+    style NA8 fill:#ff9999,stroke:#333
 ```
 
 ### Fault Isolation
@@ -432,11 +596,12 @@ graph TD
 | Failure | Website Impact | LinkedIn Impact |
 |---|---|---|
 | GitHub Actions fails | Site not updated | n8n sees no new commit -- no action |
-| GitHub API rate limit | No impact | Poll fails; retries in 5 minutes |
-| n8n workflow fails | No impact | No LinkedIn post |
-| HuggingFace API down | No impact | Fallback text used |
-| LinkedIn API down | No impact | Post not published |
-| Wait node not resumed | No impact | Execution stays Waiting; stop manually |
+| GitHub API rate limit | No impact | WF1 poll fails; retries in 5 minutes |
+| WF1 fails | No impact | No draft generated; nothing to review |
+| HuggingFace API down | No impact | Fallback text used in draft |
+| WF2 form shows no drafts | No impact | WF1 hasn't detected new posts yet |
+| Queue cleanup fails | No impact | Draft stays in queue; check n8n API key and WF1 ID |
+| LinkedIn API down | No impact | Post not published; draft already removed from queue |
 
 ---
 

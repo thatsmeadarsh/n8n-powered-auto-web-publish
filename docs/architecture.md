@@ -1,6 +1,6 @@
 # Architecture Documentation
 
-> A seamless integration of n8n workflow automation with GitHub Actions CI/CD -- turning a single `git push` into a live blog post with an AI-crafted LinkedIn announcement, all without manual intervention.
+> A seamless integration of n8n workflow automation with GitHub Actions CI/CD -- turning a single `git push` into a live blog post with an AI-crafted LinkedIn announcement, with one intentional approval step before publishing.
 
 ---
 
@@ -13,22 +13,24 @@ graph LR
     A["Author pushes to Hugo repo"] --> C["GitHub Repository"]
     C --> E["GitHub Actions CI/CD"]
     E --> F["Live Website"]
-    F -->|"n8n polls GitHub API"| D["n8n Workflow Engine"]
-    D --> G["AI Content Generation"]
-    G --> H["LinkedIn Post"]
+    F -->|"n8n polls GitHub API"| WF1["WF1: Generate LinkedIn Draft"]
+    WF1 -->|"saves draft"| WF2["WF2: Review & Publish"]
+    WF2 -->|"author reviews via form"| H["LinkedIn Post"]
 
     style A fill:#99ccff,stroke:#333
     style F fill:#99ff99,stroke:#333
+    style WF1 fill:#e6ffe6,stroke:#4a9e4a
+    style WF2 fill:#fffbe6,stroke:#d4a017
     style H fill:#99ff99,stroke:#333
 ```
 
 | Layer | System | Responsibility |
 |---|---|---|
 | **Build & Deploy** | GitHub Actions | Hugo build, static site deployment |
-| **Detection** | n8n polling GitHub API | Detects new commits on the Pages repo every 5 minutes |
-| **AI & Social** | n8n + Hugging Face + LinkedIn | Fetch post, AI summary generation, social publishing |
+| **Detection + AI Draft** | n8n WF1: Generate LinkedIn Draft | Polls for new commits, fetches content, AI generates draft, saves to queue |
+| **Review + Publish** | n8n WF2: Review & Publish to LinkedIn | Form-based review, author approves/rejects, publishes to LinkedIn |
 
-**The key insight**: n8n polls the Pages repo for new commits. A new commit means deployment is complete. n8n then fetches the post content from the source repo, generates an AI summary, and publishes to LinkedIn -- only after the site is live.
+**The key insight**: n8n WF1 polls the Pages repo for new commits. A new commit means deployment is complete. WF1 fetches the post content from the source repo, generates an AI LinkedIn draft, and saves it to a FIFO queue. WF2 provides a form-based review UI where the author can edit, approve, or reject the draft before it goes live on LinkedIn.
 
 ---
 
@@ -66,9 +68,12 @@ graph LR
                     ┌──────────────────┴────────────────────────────┐
                     │          n8n (Docker)                          │
                     │                                               │
-                    │   Poll GitHub API → Detect new commit         │
-                    │   → Fetch markdown → AI summary               │
-                    │   → LinkedIn publish                          │
+                    │   WF1: Generate LinkedIn Draft                 │
+                    │   Poll → Detect → Fetch → AI → Save Draft     │
+                    │                                               │
+                    │   WF2: Review & Publish to LinkedIn            │
+                    │   Form → Review → Approve/Reject → Publish    │
+                    │   http://localhost:5678/form/linkedin-review-form
                     │                                               │
                     └──────────────────┬────────────────────────────┘
                                        │
@@ -97,33 +102,56 @@ graph LR
                 │                                      │
 ┌───────────────┼── DOCKER (n8n v2.11.4) ──────────────▼──────────────────────┐
 │               │                                                              │
-│               │   Schedule Trigger                                           │
-│               │         │                                                    │
-│               │   Fetch Latest Deployment                                    │
-│               │         │                                                    │
-│               │   Extract New Post Slugs                                     │
-│               │         │                                                    │
-│               └── Fetch Post Markdown                                        │
-│                          │                                                   │
-│                    Parse Frontmatter                                         │
-│                          │                                                   │
-│             draft=true ──┤── draft=false                                     │
-│                  │                  │                                        │
-│                Skip         Prepare HF Request                               │
-│                                     │                                        │
-│                             HuggingFace Call ───────▶ HuggingFace Router    │
-│                                     │◀── AI post text   SambaNova / Llama   │
-│                             Format LinkedIn Post                             │
-│                                     │                                        │
-│                             Wait for Approval                                │
-│                         (author resumes via n8n UI)                         │
-│                                     │                                        │
-│                             Get LinkedIn Profile ───▶ LinkedIn API          │
-│                                     │◀── person URN     OAuth2              │
-│                             Prepare LinkedIn Post                            │
-│                                     │                                        │
-│                             POST /v2/ugcPosts ──────▶ LinkedIn API          │
-│                                                        UGC Posts             │
+│  ┌── WF1: Generate LinkedIn Draft ───────────────────────────────────────┐  │
+│  │            │                                                           │  │
+│  │            │   Schedule Trigger                                        │  │
+│  │            │         │                                                 │  │
+│  │            │   Fetch Latest Deployment                                 │  │
+│  │            │         │                                                 │  │
+│  │            │   Extract New Post Slugs                                  │  │
+│  │            │         │                                                 │  │
+│  │            └── Fetch Post Markdown                                     │  │
+│  │                       │                                                │  │
+│  │                 Parse Frontmatter                                      │  │
+│  │                       │                                                │  │
+│  │          draft=true ──┤── draft=false                                  │  │
+│  │               │                  │                                     │  │
+│  │             Skip         Prepare HF Request                            │  │
+│  │                                  │                                     │  │
+│  │                          HuggingFace Call ───────▶ HuggingFace Router  │  │
+│  │                                  │◀── AI post text   SambaNova / Llama│  │
+│  │                          Save Draft for Review                         │  │
+│  │                          (pendingDrafts queue)                         │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                       │
+│                          n8n REST API │ (read static data)                   │
+│                                      ▼                                       │
+│  ┌── WF2: Review & Publish to LinkedIn ──────────────────────────────────┐  │
+│  │                                                                        │  │
+│  │   Load Draft (Form Trigger page 1)                                     │  │
+│  │         │                                                              │  │
+│  │   Fetch Draft from WF1 (HTTP GET n8n API)                              │  │
+│  │         │                                                              │  │
+│  │   Extract Latest Draft (Code, FIFO)                                    │  │
+│  │         │                                                              │  │
+│  │   Review & Edit (Form page 2, pre-filled)                              │  │
+│  │         │                                                              │  │
+│  │   Approved? ──────────────────────────┐                                │  │
+│  │         │ true                         │ false                         │  │
+│  │   Get LinkedIn Profile ──▶ LinkedIn   Rejected (NoOp)                  │  │
+│  │         │◀── person URN     API       │                                │  │
+│  │   Prepare LinkedIn Post               │                                │  │
+│  │         │                             │                                │  │
+│  │   POST /v2/ugcPosts ────▶ LinkedIn   │                                │  │
+│  │         │                  API        │                                │  │
+│  │         └─────────────────────────────┘                                │  │
+│  │                     │                                                  │  │
+│  │         Fetch Draft for Cleanup                                        │  │
+│  │         Prepare Queue Cleanup                                          │  │
+│  │         Remove Draft from Queue (PUT n8n API)                          │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Form URL: http://localhost:5678/form/linkedin-review-form                  │
 └──────────────────────────────────────────────────────────────────────────────┘
                     │                               │
                     ▼                               ▼
@@ -191,21 +219,19 @@ graph TD
 
 The n8n workflow handles everything after deployment -- polling for changes, fetching content, AI generation, and social media publishing.
 
+#### WF1: Generate LinkedIn Draft (10 nodes)
+
 ```mermaid
 graph TD
-    ST[Schedule Trigger] --> FD[Fetch Latest Deployment]
+    ST[Poll Every 5 Minutes] --> FD[Fetch Latest Deployment]
     FD --> ES[Extract New Post Slugs]
     ES --> FM[Fetch Post Markdown]
     FM --> PF[Parse Frontmatter]
     PF --> DC{Is Not Draft?}
     DC -->|true| PR[Prepare HF Request]
-    DC -->|false| SK[Skip]
+    DC -->|false| SK[Skip - Draft]
     PR --> HF[AI Generate LinkedIn Post]
-    HF --> FL[Format LinkedIn Post]
-    FL --> WA[Wait for Approval]
-    WA --> GL[Get LinkedIn Profile]
-    GL --> PL[Prepare LinkedIn Post]
-    PL --> LI[Post to LinkedIn]
+    HF --> SD[Save Draft for Review]
 
     style ST fill:#f0e6ff,stroke:#8a4ac8
     style FD fill:#f0e6ff,stroke:#8a4ac8
@@ -216,12 +242,43 @@ graph TD
     style SK fill:#f0f0f0,stroke:#999
     style PR fill:#e6ffe6,stroke:#4a9e4a
     style HF fill:#e6ffe6,stroke:#4a9e4a
-    style FL fill:#e6ffe6,stroke:#4a9e4a
-    style WA fill:#fffbe6,stroke:#d4a017
+    style SD fill:#fffbe6,stroke:#d4a017
+```
+
+![WF1: Generate LinkedIn Draft](../screenshots/generate-linkedin-draft-n8n.png)
+
+#### WF2: Review & Publish to LinkedIn (10 nodes)
+
+```mermaid
+graph TD
+    LD[Load Draft - Form Trigger page 1] --> FD[Fetch Draft from WF1 - HTTP GET n8n API]
+    FD --> EX[Extract Latest Draft - Code FIFO]
+    EX --> RE[Review & Edit - Form page 2 pre-filled]
+    RE --> AP{Approved?}
+    AP -->|true| GL[Get LinkedIn Profile]
+    GL --> PL[Prepare LinkedIn Post]
+    PL --> LI[Post to LinkedIn]
+    AP -->|false| RJ[Rejected - NoOp]
+    LI --> FC[Fetch Draft for Cleanup]
+    RJ --> FC
+    FC --> PC[Prepare Queue Cleanup]
+    PC --> RM[Remove Draft from Queue - PUT n8n API]
+
+    style LD fill:#f0e6ff,stroke:#8a4ac8
+    style FD fill:#f0e6ff,stroke:#8a4ac8
+    style EX fill:#e6f3ff,stroke:#4a86c8
+    style RE fill:#fffbe6,stroke:#d4a017
+    style AP fill:#fff3e6,stroke:#e8a020
     style GL fill:#ffe6f0,stroke:#c84a86
     style PL fill:#ffe6f0,stroke:#c84a86
     style LI fill:#ffe6f0,stroke:#c84a86
+    style RJ fill:#f0f0f0,stroke:#999
+    style FC fill:#e6f3ff,stroke:#4a86c8
+    style PC fill:#e6f3ff,stroke:#4a86c8
+    style RM fill:#e6f3ff,stroke:#4a86c8
 ```
+
+![WF2: Review & Publish to LinkedIn](../screenshots/review-and-publish-linkedin-n8n.png)
 
 ---
 
@@ -233,7 +290,8 @@ sequenceDiagram
     participant HugoRepo as GitHub Hugo Repo
     participant Actions as GitHub Actions
     participant PagesRepo as GitHub Pages Repo
-    participant n8n as n8n (Docker)
+    participant WF1 as n8n WF1: Generate Draft
+    participant WF2 as n8n WF2: Review & Publish
     participant HF as HuggingFace API
     participant LinkedIn as LinkedIn API
 
@@ -248,34 +306,44 @@ sequenceDiagram
     deactivate Actions
     Note right of PagesRepo: GitHub Pages deploys — site is live
 
-    Note over n8n,LinkedIn: Pipeline 2 — Detection, AI, and Social
+    Note over WF1,HF: Pipeline 2 — WF1: Detection + AI Draft
     loop Every 5 minutes
-        n8n->>PagesRepo: GET /repos/.../commits/main
-        PagesRepo-->>n8n: Commit SHA + changed files
+        WF1->>PagesRepo: GET /repos/.../commits/main
+        PagesRepo-->>WF1: Commit SHA + changed files
     end
-    Note over n8n: New SHA detected — new deployment
+    Note over WF1: New SHA detected — new deployment
 
-    n8n->>HugoRepo: GET raw markdown for new post
-    HugoRepo-->>n8n: Markdown with frontmatter
+    WF1->>HugoRepo: GET raw markdown for new post
+    HugoRepo-->>WF1: Markdown with frontmatter
 
     alt draft = false
-        n8n->>HF: POST chat/completions (Llama 3.1)
+        WF1->>HF: POST chat/completions (Llama 3.1)
         activate HF
-        HF-->>n8n: AI-generated LinkedIn post text
+        HF-->>WF1: AI-generated LinkedIn post text
         deactivate HF
-        Note over n8n: Execution pauses at Wait for Approval node
-        Author->>n8n: Opens localhost:5678, goes to Executions tab
-        Author->>n8n: Finds Waiting execution, copies resumeUrl
-        Author->>n8n: Opens resumeUrl in browser to approve
-        Note over n8n: Execution resumes
-        n8n->>LinkedIn: GET /v2/userinfo
-        LinkedIn-->>n8n: Person URN
-        n8n->>LinkedIn: POST /v2/ugcPosts
-        LinkedIn-->>n8n: Post URN (published)
-        Note right of LinkedIn: Post live with article card preview
+        Note over WF1: Saves draft to pendingDrafts queue (static data)
     else draft = true
-        Note over n8n: Skip — no LinkedIn post
+        Note over WF1: Skip — no LinkedIn draft
     end
+
+    Note over Author,LinkedIn: Pipeline 3 — WF2: Form Review + Publish
+    Author->>WF2: Opens form URL (localhost:5678/form/linkedin-review-form)
+    WF2->>WF1: GET static data via n8n REST API (internal API key)
+    WF1-->>WF2: pendingDrafts queue
+    Note over WF2: Extracts latest draft (FIFO), pre-fills form
+    WF2->>Author: Shows review form with draft text
+    Author->>WF2: Reviews, edits, approves or rejects
+
+    alt approved
+        WF2->>LinkedIn: GET /v2/userinfo
+        LinkedIn-->>WF2: Person URN
+        WF2->>LinkedIn: POST /v2/ugcPosts
+        LinkedIn-->>WF2: Post URN (published)
+        Note right of LinkedIn: Post live with article card preview
+    else rejected
+        Note over WF2: No LinkedIn post
+    end
+    WF2->>WF1: PUT static data via n8n REST API (remove draft from queue)
 ```
 
 ---
@@ -299,21 +367,31 @@ graph TB
         GA1 --> GA2 --> GA3 --> GA4
     end
 
-    subgraph n8nWorkflow["n8n: Detection, AI and Social Media"]
+    subgraph n8nWF1["n8n WF1: Generate LinkedIn Draft"]
         direction TB
         N1["Triggered by new commit detected via polling"]
         N2["Fetches and parses blog content"]
-        N3["AI generates LinkedIn summary"]
-        N4["Approval gate then posts to LinkedIn"]
+        N3["AI generates LinkedIn draft"]
+        N4["Saves draft to pendingDrafts queue"]
         N1 --> N2 --> N3 --> N4
     end
 
+    subgraph n8nWF2["n8n WF2: Review & Publish"]
+        direction TB
+        N5["Author opens form URL"]
+        N6["Form-based review with pre-filled draft"]
+        N7["Approve -> posts to LinkedIn"]
+        N5 --> N6 --> N7
+    end
+
     GitHubActions -->|"commit to Pages repo"| Bridge
-    Bridge -->|"new commit detected"| n8nWorkflow
+    Bridge -->|"new commit detected"| n8nWF1
+    n8nWF1 -->|"draft saved to static data"| n8nWF2
 
     style Bridge fill:#ffcc66,stroke:#333
     style GitHubActions fill:#e6f3ff,stroke:#4a86c8
-    style n8nWorkflow fill:#e6ffe6,stroke:#4a9e4a
+    style n8nWF1 fill:#e6ffe6,stroke:#4a9e4a
+    style n8nWF2 fill:#fffbe6,stroke:#d4a017
 ```
 
 ### Why This Integration Works
@@ -325,7 +403,7 @@ graph TB
 | **Deployment guarantee** | n8n only fires after a new commit appears on the Pages repo, meaning deployment is complete. |
 | **No host dependencies** | No file watcher, no tunnels, no background processes. Just `git push` and Docker. |
 | **Fault isolation** | If LinkedIn posting fails, the website is still live. If GitHub Actions fails, n8n sees no new commit. |
-| **One intentional manual step** | After `git push`, everything runs automatically up to the LinkedIn approval gate. The author reviews and resumes the waiting execution in n8n before the post goes live -- by design, not by accident. |
+| **One intentional manual step** | After `git push`, WF1 runs automatically up to saving the draft. The author opens a form URL, reviews the AI-generated text, and approves or rejects via WF2 -- by design, not by accident. |
 | **Corporate-friendly** | Polling uses outbound HTTPS only -- works behind corporate proxies and firewalls. |
 
 ---
@@ -336,7 +414,7 @@ graph TB
 graph LR
     subgraph Secrets["Credential Storage"]
         GS["GitHub Secrets: PERSONAL_ACCESS_TOKEN"]
-        NC["n8n Credential Store: GitHub, LinkedIn, HuggingFace"]
+        NC["n8n Credential Store: GitHub, LinkedIn, HuggingFace, n8n Internal API Key"]
     end
 
     subgraph Access["Access Scope"]
@@ -344,6 +422,7 @@ graph LR
         NC --> GTA["GitHub: repo read scope"]
         NC --> LIA["LinkedIn: w_member_social only"]
         NC --> HFA["HuggingFace: Inference only"]
+        NC --> N8A["n8n API: Workflow read/write (static data)"]
     end
 
     style Secrets fill:#fff3e6,stroke:#333
@@ -356,6 +435,7 @@ graph LR
 | GitHub PAT (n8n) | n8n credential store | `repo` (read access for commits + raw files) | Configurable |
 | HuggingFace token | n8n credential store | Inference Providers only | No expiry |
 | LinkedIn OAuth2 | n8n credential store (encrypted) | `w_member_social` | 2 months (auto-refreshed by n8n) |
+| n8n Internal API Key | n8n credential store | Workflow read/write (static data access) | No expiry |
 
 ### Security Boundaries
 
@@ -441,32 +521,52 @@ LinkedIn scheduled post includes article link:
 
 ## LinkedIn Review & Approval Flow
 
-Rather than publishing immediately or using LinkedIn's scheduled post API (which requires special partner permissions), the workflow pauses at an n8n **Wait node** and resumes only when the author explicitly approves from the n8n UI.
+Rather than publishing immediately or using LinkedIn's scheduled post API (which requires special partner permissions), the system uses a **two-workflow architecture** with a **form-based review step**. WF1 saves AI-generated drafts to a queue, and WF2 presents them to the author via an n8n form for review.
 
 ```
-n8n generates AI LinkedIn post text
+WF1: Generate LinkedIn Draft
+              │
+    AI generates LinkedIn post text
               │
               ▼
-Wait for Approval node (lifecycleState paused in n8n)
+    Save Draft for Review
+    (appends to pendingDrafts queue in static data)
+
+              ── cross-workflow boundary ──
+
+WF2: Review & Publish to LinkedIn
               │
-              │  Author opens http://localhost:5678
-              │  Executions → find "Waiting" execution
-              │  Click node → copy resumeUrl → open in browser
+    Author opens http://localhost:5678/form/linkedin-review-form
+              │
+              ▼
+    Load Draft (Form Trigger page 1)
+              │
+    Fetch Draft from WF1 (HTTP GET n8n REST API)
+              │
+    Extract Latest Draft (FIFO from queue)
+              │
+    Review & Edit (Form page 2, pre-filled with draft text)
               │
     ┌─────────┴──────────────┐
     │                        │
     ▼                        ▼
- Approve                 Don't approve
- (visit resumeUrl)       (let execution expire)
+ Approve                  Reject
     │                        │
     ▼                        ▼
 LinkedIn post goes live    No post published
 with article link preview
+    │                        │
+    └────────────┬───────────┘
+                 ▼
+    Remove Draft from Queue
+    (PUT n8n REST API to update WF1 static data)
 ```
 
-**The article link card** (title + description + thumbnail) is automatically generated by LinkedIn when it crawls the `originalUrl`. Since the URL is already live when n8n fires, the preview renders correctly.
+**The article link card** (title + description + thumbnail) is automatically generated by LinkedIn when it crawls the `originalUrl`. Since the URL is already live when WF1 fires, the preview renders correctly.
 
 **Why not LinkedIn scheduled posts?** LinkedIn's `scheduledPublishTime` field in the UGC Posts API requires a special "Scheduled Sharing" permission that is only available to LinkedIn Marketing Partners. Standard developer apps receive a `403 Forbidden — Unpermitted fields: /scheduledPublishTime` error.
+
+**Why not a Wait node?** n8n 2.11.4 has a known SQLite bug (`SQLITE_ERROR: no such table: main.execution_data`) when using Wait or Form Trigger nodes in certain configurations. The two-workflow split with n8n REST API communication avoids this entirely while providing a cleaner form-based UX.
 
 ---
 
@@ -485,7 +585,10 @@ with article link preview
 | **Code nodes for JSON construction** | Blog content contains special characters that break inline JSON templates |
 | **SambaNova via HuggingFace Router** | Free tier, fast inference, OpenAI-compatible API format |
 | **Draft check in n8n** | Allows deploying draft posts to test site rendering without triggering LinkedIn |
-| **Wait node over LinkedIn scheduled posts** | LinkedIn `scheduledPublishTime` requires LinkedIn Marketing Partner access; Wait node provides equivalent review window using only standard API |
+| **Two-workflow split** | Avoids n8n 2.11.4's SQLite bug with Wait/Form nodes in a single workflow; provides cleaner separation between automated detection and human review |
+| **Form-based review over Wait node** | n8n 2.11.4 has a `SQLITE_ERROR: no such table: main.execution_data` bug when using Wait nodes; form-based review in a separate workflow provides a better UX and avoids the bug entirely |
+| **FIFO draft queue** | `pendingDrafts` array in static data handles multiple drafts if the author pushes several posts before reviewing; oldest draft is presented first |
+| **n8n REST API for cross-workflow data** | WF2 reads WF1's static data via the n8n internal API (`/api/v1/workflows/{id}`), avoiding the need for an external database or shared file system |
 | **`--buildFuture` flag on Hugo build** | Ensures posts with a future-dated frontmatter timestamp are included in the build |
 | **`public/` in `.gitignore`** | Build artifacts are generated fresh by GitHub Actions on every run; committing them to the source repo was redundant and caused merge conflicts |
 | **`actions/checkout@v4` + `peaceiris/actions-hugo@v3`** | Updated from v3/v2 to maintain Node.js 24 compatibility ahead of GitHub's June 2026 forced migration |
