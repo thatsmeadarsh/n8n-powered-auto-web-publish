@@ -84,72 +84,51 @@ graph LR
 
 ### Complete System Component Diagram
 
-```mermaid
-graph TB
-    subgraph GitHub["GitHub Cloud"]
-        subgraph HugoRepo["whataboutadarsh repo"]
-            SRC[content/posts/*.md]
-            GA[GitHub Actions Workflow<br/>hugo.yml]
-        end
-        subgraph PagesRepo["thatsmeadarsh.github.io repo"]
-            HTML[Static HTML files]
-            PA[GitHub Pages Action<br/>Deploy to Pages]
-            GAPI[GitHub REST API<br/>commits endpoint]
-        end
-    end
-
-    subgraph Docker["Docker Container"]
-        subgraph n8n["n8n v2.11.4"]
-            ST[Schedule Trigger<br/>Every 5 minutes]
-            FD[Fetch Latest Deployment<br/>GET /commits/main]
-            ES[Extract New Post Slugs<br/>Compare SHA + parse files]
-            FM[Fetch Post Markdown<br/>GET raw from source repo]
-            PF[Parse Frontmatter<br/>Extract metadata]
-            DC{Draft Check}
-            PR[Prepare HF Request<br/>Build AI prompt]
-            HF[HTTP Request<br/>HuggingFace API]
-            FL[Format LinkedIn Post<br/>Extract AI text]
-            WA[Wait for Approval<br/>Resume via n8n UI]
-            GL[HTTP Request<br/>LinkedIn Profile]
-            PL[Prepare LinkedIn Post<br/>Build UGC body]
-            LI[HTTP Request<br/>LinkedIn Publish]
-            SK[Skip - Draft]
-        end
-    end
-
-    subgraph APIs["External APIs"]
-        HFA[Hugging Face Router<br/>SambaNova Provider<br/>Meta-Llama-3.1-8B]
-        LIA[LinkedIn API<br/>OAuth2 + UGC Posts]
-    end
-
-    subgraph Output["Published Outputs"]
-        WEB["thatsmeadarsh.github.io<br/>Live Blog Post"]
-        LIP["LinkedIn Feed<br/>AI-Generated Announcement"]
-    end
-
-    SRC -->|triggers| GA
-    GA -->|hugo build + push| HTML
-    HTML -->|triggers| PA --> WEB
-    ST --> FD
-    FD -->|poll| GAPI
-    FD --> ES --> FM
-    FM -->|GET raw markdown| SRC
-    FM --> PF --> DC
-    DC -->|not draft| PR
-    DC -->|draft| SK
-    PR --> HF
-    HF -->|API call| HFA
-    HFA -->|response| FL
-    FL --> WA --> GL
-    GL -->|GET profile| LIA
-    GL --> PL --> LI
-    LI -->|POST ugcPosts| LIA
-    LIA --> LIP
-
-    style GitHub fill:#f0f0f0,stroke:#333
-    style Docker fill:#fff3e6,stroke:#e8a020
-    style APIs fill:#e6ffe6,stroke:#4a9e4a
-    style Output fill:#ffe6f0,stroke:#c84a86
+```
+┌─── GITHUB CLOUD ────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  ┌── whataboutadarsh ────────────┐     ┌── thatsmeadarsh.github.io ──────┐  │
+│  │  content/posts/*.md           │     │  Static HTML files              │  │
+│  │  GitHub Actions (hugo.yml)    │────▶│  GitHub Pages CDN               │  │
+│  └───────────────────────────────┘     │  REST API: /commits/main        │  │
+│               ▲ GET raw .md            └─────────────────────────────────┘  │
+│               │                                      │ polls every 5 min    │
+└───────────────┼──────────────────────────────────────┼──────────────────────┘
+                │                                      │
+┌───────────────┼── DOCKER (n8n v2.11.4) ──────────────▼──────────────────────┐
+│               │                                                              │
+│               │   Schedule Trigger                                           │
+│               │         │                                                    │
+│               │   Fetch Latest Deployment                                    │
+│               │         │                                                    │
+│               │   Extract New Post Slugs                                     │
+│               │         │                                                    │
+│               └── Fetch Post Markdown                                        │
+│                          │                                                   │
+│                    Parse Frontmatter                                         │
+│                          │                                                   │
+│             draft=true ──┤── draft=false                                     │
+│                  │                  │                                        │
+│                Skip         Prepare HF Request                               │
+│                                     │                                        │
+│                             HuggingFace Call ───────▶ HuggingFace Router    │
+│                                     │◀── AI post text   SambaNova / Llama   │
+│                             Format LinkedIn Post                             │
+│                                     │                                        │
+│                             Wait for Approval                                │
+│                         (author resumes via n8n UI)                         │
+│                                     │                                        │
+│                             Get LinkedIn Profile ───▶ LinkedIn API          │
+│                                     │◀── person URN     OAuth2              │
+│                             Prepare LinkedIn Post                            │
+│                                     │                                        │
+│                             POST /v2/ugcPosts ──────▶ LinkedIn API          │
+│                                                        UGC Posts             │
+└──────────────────────────────────────────────────────────────────────────────┘
+                    │                               │
+                    ▼                               ▼
+        thatsmeadarsh.github.io             LinkedIn Feed
+        (live blog post)                    (AI announcement)
 ```
 
 ---
@@ -165,26 +144,26 @@ graph TD
     end
 
     subgraph Build["Build Phase"]
-        CO[Checkout code<br/>with submodules]
-        HS[Setup Hugo<br/>latest extended]
-        DL[Download Contentful JSON<br/>services data]
+        CO[Checkout with submodules]
+        HS[Setup Hugo latest extended]
+        DL[Download Contentful JSON]
         CD[Commit data folder]
         PD[Push data changes]
-        RC[Delete Hugo cache<br/>resources/_gen]
-        HB[Run: hugo --buildFuture<br/>Generate static site]
+        RC[Delete Hugo cache]
+        HB[Run hugo --buildFuture]
     end
 
     subgraph Deploy["Deploy Phase"]
         CL[Clone thatsmeadarsh.github.io]
         RM[Clear target repo]
-        CY[Copy public/* to target]
+        CY[Copy public/ to target]
         CM[Commit site content]
-        PS[Push to GitHub Pages repo]
+        PS[Push to Pages repo]
     end
 
     subgraph Live["Auto-Deploy"]
-        PA[GitHub Pages Action<br/>in thatsmeadarsh.github.io]
-        WB[Website Goes Live]
+        PA[GitHub Pages Action triggers]
+        WB[Website goes live]
     end
 
     T --> CO --> HS --> DL --> CD --> PD
@@ -214,55 +193,34 @@ The n8n workflow handles everything after deployment -- polling for changes, fet
 
 ```mermaid
 graph TD
-    subgraph Polling["1. Polling"]
-        ST[Schedule Trigger<br/>Every 5 minutes]
-        FD[Fetch Latest Deployment<br/>GET /repos/.../commits/main]
-    end
+    ST[Schedule Trigger] --> FD[Fetch Latest Deployment]
+    FD --> ES[Extract New Post Slugs]
+    ES --> FM[Fetch Post Markdown]
+    FM --> PF[Parse Frontmatter]
+    PF --> DC{Is Not Draft?}
+    DC -->|true| PR[Prepare HF Request]
+    DC -->|false| SK[Skip]
+    PR --> HF[AI Generate LinkedIn Post]
+    HF --> FL[Format LinkedIn Post]
+    FL --> WA[Wait for Approval]
+    WA --> GL[Get LinkedIn Profile]
+    GL --> PL[Prepare LinkedIn Post]
+    PL --> LI[Post to LinkedIn]
 
-    subgraph Detection["2. Detection"]
-        ES[Extract New Post Slugs<br/>Compare SHA with stored state<br/>Filter for new posts/*]
-    end
-
-    subgraph Fetch["3. Content Fetch"]
-        FM[Fetch Post Markdown<br/>GET raw .md from Hugo source repo]
-        PF[Parse Frontmatter<br/>Regex extracts TOML metadata]
-    end
-
-    subgraph Validation["4. Validation"]
-        DC{draft === false?}
-        SK[Skip Node<br/>No LinkedIn for drafts]
-    end
-
-    subgraph AIGeneration["5. AI Content Generation"]
-        PR[Prepare HF Request<br/>Builds chat prompt]
-        HF[HuggingFace API Call<br/>SambaNova / Llama 3.1]
-        FL[Format Response<br/>Extract text + fallback]
-    end
-
-    subgraph Review["6. Review & Approval"]
-        WA[Wait for Approval<br/>Execution pauses — resume via n8n UI]
-    end
-
-    subgraph LinkedInPublish["7. LinkedIn Publishing"]
-        GL[Get Profile<br/>GET /v2/userinfo]
-        PL[Prepare Post Body<br/>Build UGC schema]
-        LI[Publish Post<br/>POST /v2/ugcPosts]
-    end
-
-    ST --> FD --> ES --> FM --> PF --> DC
-    DC -->|true| PR
-    DC -->|false| SK
-    PR --> HF --> FL
-    FL --> WA --> GL --> PL --> LI
-
-    style Review fill:#fffbe6,stroke:#d4a017
-
-    style Polling fill:#f0e6ff,stroke:#8a4ac8
-    style Detection fill:#e6f3ff,stroke:#4a86c8
-    style Fetch fill:#f0f0e6,stroke:#999
-    style Validation fill:#fff3e6,stroke:#e8a020
-    style AIGeneration fill:#e6ffe6,stroke:#4a9e4a
-    style LinkedInPublish fill:#ffe6f0,stroke:#c84a86
+    style ST fill:#f0e6ff,stroke:#8a4ac8
+    style FD fill:#f0e6ff,stroke:#8a4ac8
+    style ES fill:#e6f3ff,stroke:#4a86c8
+    style FM fill:#f0f0e6,stroke:#999
+    style PF fill:#f0f0e6,stroke:#999
+    style DC fill:#fff3e6,stroke:#e8a020
+    style SK fill:#f0f0f0,stroke:#999
+    style PR fill:#e6ffe6,stroke:#4a9e4a
+    style HF fill:#e6ffe6,stroke:#4a9e4a
+    style FL fill:#e6ffe6,stroke:#4a9e4a
+    style WA fill:#fffbe6,stroke:#d4a017
+    style GL fill:#ffe6f0,stroke:#c84a86
+    style PL fill:#ffe6f0,stroke:#c84a86
+    style LI fill:#ffe6f0,stroke:#c84a86
 ```
 
 ---
@@ -305,13 +263,16 @@ sequenceDiagram
         activate HF
         HF-->>n8n: AI-generated LinkedIn post text
         deactivate HF
-        Note over n8n: Execution pauses at Wait node
-        Note over n8n: Author approves via n8n UI (localhost:5678)
+        Note over n8n: Execution pauses at Wait for Approval node
+        Author->>n8n: Opens localhost:5678, goes to Executions tab
+        Author->>n8n: Finds Waiting execution, copies resumeUrl
+        Author->>n8n: Opens resumeUrl in browser to approve
+        Note over n8n: Execution resumes
         n8n->>LinkedIn: GET /v2/userinfo
         LinkedIn-->>n8n: Person URN
         n8n->>LinkedIn: POST /v2/ugcPosts
         LinkedIn-->>n8n: Post URN (published)
-        Note right of LinkedIn: Post live with article link preview
+        Note right of LinkedIn: Post live with article card preview
     else draft = true
         Note over n8n: Skip — no LinkedIn post
     end
@@ -326,24 +287,24 @@ sequenceDiagram
 ```mermaid
 graph TB
     subgraph Bridge["The Bridge: GitHub API Polling"]
-        FW["n8n polls commits endpoint<br/>New commit = deployment complete"]
+        FW["n8n polls commits — new commit means deployment complete"]
     end
 
-    subgraph GitHubActions["GitHub Actions -- Build & Deploy"]
+    subgraph GitHubActions["GitHub Actions: Build and Deploy"]
         direction TB
-        GA1["Triggered by: git push to Hugo repo"]
+        GA1["Triggered by git push to Hugo repo"]
         GA2["Builds Hugo static site"]
         GA3["Deploys to GitHub Pages"]
         GA4["Output: Live website"]
         GA1 --> GA2 --> GA3 --> GA4
     end
 
-    subgraph n8nWorkflow["n8n -- Detection, AI & Social Media"]
+    subgraph n8nWorkflow["n8n: Detection, AI and Social Media"]
         direction TB
-        N1["Triggered by: new commit detected via polling"]
+        N1["Triggered by new commit detected via polling"]
         N2["Fetches and parses blog content"]
         N3["AI generates LinkedIn summary"]
-        N4["Posts to LinkedIn with article link"]
+        N4["Approval gate then posts to LinkedIn"]
         N1 --> N2 --> N3 --> N4
     end
 
@@ -374,13 +335,13 @@ graph TB
 ```mermaid
 graph LR
     subgraph Secrets["Credential Storage"]
-        GS["GitHub Secrets<br/>PERSONAL_ACCESS_TOKEN"]
-        NC["n8n Credential Store<br/>GitHub API Token<br/>LinkedIn OAuth2<br/>HuggingFace Header Auth"]
+        GS["GitHub Secrets: PERSONAL_ACCESS_TOKEN"]
+        NC["n8n Credential Store: GitHub, LinkedIn, HuggingFace"]
     end
 
     subgraph Access["Access Scope"]
         GS --> GHA["GitHub: repo + workflow scope"]
-        NC --> GTA["GitHub: repo (read commits)"]
+        NC --> GTA["GitHub: repo read scope"]
         NC --> LIA["LinkedIn: w_member_social only"]
         NC --> HFA["HuggingFace: Inference only"]
     end
