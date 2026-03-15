@@ -109,6 +109,7 @@ graph TB
             PR[Prepare HF Request<br/>Build AI prompt]
             HF[HTTP Request<br/>HuggingFace API]
             FL[Format LinkedIn Post<br/>Extract AI text]
+            WA[Wait for Approval<br/>Resume via n8n UI]
             GL[HTTP Request<br/>LinkedIn Profile]
             PL[Prepare LinkedIn Post<br/>Build UGC body]
             LI[HTTP Request<br/>LinkedIn Publish]
@@ -129,16 +130,20 @@ graph TB
     SRC -->|triggers| GA
     GA -->|hugo build + push| HTML
     HTML -->|triggers| PA --> WEB
-    ST --> FD -->|poll| GAPI
+    ST --> FD
+    FD -->|poll| GAPI
     FD --> ES --> FM
     FM -->|GET raw markdown| SRC
     FM --> PF --> DC
-    DC -->|not draft| PR --> HF
+    DC -->|not draft| PR
     DC -->|draft| SK
+    PR --> HF
     HF -->|API call| HFA
     HFA -->|response| FL
-    FL --> GL -->|fetch profile| LIA
-    GL --> PL --> LI -->|publish| LIA
+    FL --> WA --> GL
+    GL -->|GET profile| LIA
+    GL --> PL --> LI
+    LI -->|POST ugcPosts| LIA
     LIA --> LIP
 
     style GitHub fill:#f0f0f0,stroke:#333
@@ -262,75 +267,54 @@ graph TD
 
 ---
 
-## System Flow Diagram (PlantUML)
+## System Flow Diagram (Sequence)
 
-```plantuml
-@startuml
-!theme plain
-skinparam backgroundColor #FFFFFF
-skinparam sequenceMessageAlign center
-skinparam responseMessageBelowArrow true
+```mermaid
+sequenceDiagram
+    actor Author
+    participant HugoRepo as GitHub Hugo Repo
+    participant Actions as GitHub Actions
+    participant PagesRepo as GitHub Pages Repo
+    participant n8n as n8n (Docker)
+    participant HF as HuggingFace API
+    participant LinkedIn as LinkedIn API
 
-title End-to-End Auto-Publish System Flow
+    Note over Author,PagesRepo: Pipeline 1 — Build and Deploy
+    Author->>HugoRepo: git push to main
+    HugoRepo->>Actions: Triggers workflow
+    activate Actions
+    Actions->>Actions: Checkout + setup Hugo
+    Actions->>Actions: Download Contentful data
+    Actions->>Actions: Run hugo --buildFuture
+    Actions->>PagesRepo: Push built HTML (cross-repo)
+    deactivate Actions
+    Note right of PagesRepo: GitHub Pages deploys — site is live
 
-actor Author as author
-participant "Git CLI" as git
-participant "GitHub\nwhataboutadarsh" as hugorepo
-participant "GitHub Actions\nCI/CD" as actions
-participant "GitHub\nthatsmeadarsh.github.io" as pagesrepo
-participant "GitHub Pages\nCDN" as cdn
-participant "n8n\nSchedule Trigger" as trigger
-participant "n8n\nFetch & Parse" as parse
-participant "HuggingFace\nSambaNova" as hf
-participant "n8n\nFormat Post" as format
-participant "LinkedIn\nAPI" as linkedin
+    Note over n8n,LinkedIn: Pipeline 2 — Detection, AI, and Social
+    loop Every 5 minutes
+        n8n->>PagesRepo: GET /repos/.../commits/main
+        PagesRepo-->>n8n: Commit SHA + changed files
+    end
+    Note over n8n: New SHA detected — new deployment
 
-== Author Pushes ==
-author -> git : git add + commit + push
-git -> hugorepo : push to main branch
-note right of hugorepo : Push triggers\nGitHub Actions
-
-== Pipeline 1: Build & Deploy ==
-hugorepo -> actions : Workflow triggered
-activate actions
-actions -> actions : Checkout + setup Hugo
-actions -> actions : Download Contentful data
-actions -> actions : Run hugo build
-actions -> pagesrepo : Push built HTML
-deactivate actions
-pagesrepo -> cdn : GitHub Pages deploys
-note right of cdn : Website is live
-
-== Pipeline 2: n8n Polling & Social ==
-trigger -> pagesrepo : GET /repos/.../commits/main\n(every 5 minutes)
-pagesrepo --> trigger : Latest commit SHA + files
-trigger -> trigger : Compare SHA with stored state
-
-alt new commit detected
-    trigger -> parse : Extract new post slugs from files
-    parse -> hugorepo : GET raw markdown via GitHub API
-    hugorepo --> parse : Markdown file content
-    parse -> parse : Parse frontmatter\nCheck draft status
+    n8n->>HugoRepo: GET raw markdown for new post
+    HugoRepo-->>n8n: Markdown with frontmatter
 
     alt draft = false
-        parse -> hf : POST /sambanova/v1/chat/completions\n{system prompt + article context}
-        activate hf
-        hf --> parse : AI-generated LinkedIn post text
-        deactivate hf
-        parse -> format : Format response
-        format -> linkedin : GET /v2/userinfo
-        linkedin --> format : Person URN
-        format -> linkedin : POST /v2/ugcPosts\n{author, commentary, article URL}
-        linkedin --> format : Post published
-        note right of linkedin : LinkedIn post is live\nwith article link preview
+        n8n->>HF: POST chat/completions (Llama 3.1)
+        activate HF
+        HF-->>n8n: AI-generated LinkedIn post text
+        deactivate HF
+        Note over n8n: Execution pauses at Wait node
+        Note over n8n: Author approves via n8n UI (localhost:5678)
+        n8n->>LinkedIn: GET /v2/userinfo
+        LinkedIn-->>n8n: Person URN
+        n8n->>LinkedIn: POST /v2/ugcPosts
+        LinkedIn-->>n8n: Post URN (published)
+        Note right of LinkedIn: Post live with article link preview
     else draft = true
-        parse -> parse : Skip (no LinkedIn post)
+        Note over n8n: Skip — no LinkedIn post
     end
-else same commit as last poll
-    trigger -> trigger : No action (already processed)
-end
-
-@enduml
 ```
 
 ---
