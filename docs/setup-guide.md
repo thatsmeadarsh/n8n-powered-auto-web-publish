@@ -188,6 +188,8 @@ Then add it to your Hugo repo:
 
 > **Note**: On first activation, n8n stores the current commit SHA without processing it. New LinkedIn posts are created starting from the next deployment.
 
+> **No SMTP or email credential needed.** The review mechanism uses the n8n Wait node, not email. Approvals are done directly in the n8n UI (see Step 6).
+
 ---
 
 ## Step 6: Test the Pipeline
@@ -220,9 +222,17 @@ git push origin main
 
 ### Test with a Real Post (publishes to LinkedIn)
 
-Change `draft = true` to `draft = false` and push a new post. Verify:
-1. Post appears on your website
-2. Within 5 minutes, LinkedIn post shows up on your profile
+Change `draft = true` to `draft = false` and push a new post. The flow:
+
+1. GitHub Actions builds and deploys the site (~1-3 minutes)
+2. Within 5 minutes, n8n detects the new commit
+3. n8n generates the AI LinkedIn post and reaches the **Wait for Approval** node
+4. The execution pauses — open `http://localhost:5678` > **Executions** > find the **"Waiting"** execution
+5. Click the execution, expand the **Wait for Approval** node output, and copy the `resumeUrl`
+6. Open the `resumeUrl` in your browser to approve and resume
+7. n8n fetches your LinkedIn profile, builds the post body, and publishes immediately
+
+**Editing the AI-generated post before approving**: The AI post text is visible in the **Format LinkedIn Post** node output within the waiting execution. If you want to edit it, you can modify the post directly on LinkedIn after it publishes, or stop the execution and re-trigger with a fresh push.
 
 ### Test n8n Manually
 
@@ -237,15 +247,19 @@ In the n8n workflow editor, click **"Test Workflow"** to run a single poll cycle
 | **n8n not accessible** | `docker ps` to check container; `docker start n8n` |
 | **SSL errors in n8n** | Ensure `NODE_TLS_REJECT_UNAUTHORIZED=0` set; restart container |
 | **No new posts detected** | Check that Hugo build adds files like `posts/{slug}/index.html` |
+| **Post not built (future date)** | Ensure GitHub Actions runs `hugo --buildFuture`; without this flag, future-dated posts are skipped |
 | **Markdown fetch fails** | Check source repo is accessible; for private repos, add auth to Fetch node |
 | **LinkedIn "unauthorized_scope"** | Turn OFF "Organization Support" and "Legacy" in credential |
 | **LinkedIn "unable to sign"** | Re-authorize: open credential > "Connect my account" |
+| **LinkedIn 403 on scheduled post** | Do not use `lifecycleState: SCHEDULED` -- requires Marketing Partner access. Use `PUBLISHED` |
+| **Wait node execution not visible** | Go to n8n **Executions** tab; filter by **"Waiting"** status |
 | **HuggingFace model deprecated** | Use `Meta-Llama-3.1-8B-Instruct` on `sambanova` provider |
-| **GitHub Actions fails** | Check `PERSONAL_ACCESS_TOKEN` hasn't expired |
+| **GitHub Actions fails (Node.js 16)** | Update to `actions/checkout@v4` and `peaceiris/actions-hugo@v3` |
+| **GitHub Actions "Commit public folder" fails** | Add `public/` to `.gitignore`; the runner copies `public/*` to Pages repo directly |
 | **Git push rejected** | Run `git pull --rebase` in the affected repo |
 | **n8n processes same post twice** | Check workflow static data; SHA should update after each run |
 
 ---
 
-*Last Updated: 2026-03-14*
+*Last Updated: 2026-03-15*
 *Project: n8n-Powered Auto Web Publish*

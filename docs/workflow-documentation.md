@@ -47,9 +47,7 @@ graph TD
 
     subgraph Stage3["Stage 3: Build"]
         RC["Delete Hugo cache<br/>(resources/_gen)"]
-        HB["Run: hugo<br/>Generates static site"]
-        CP["Commit public folder"]
-        PP["Push public changes"]
+        HB["Run: hugo --buildFuture<br/>Generates static site"]
     end
 
     subgraph Stage4["Stage 4: Deploy"]
@@ -65,7 +63,10 @@ graph TD
         WB["Website goes live"]
     end
 
-    Stage1 --> Stage2 --> Stage3 --> Stage4 --> Stage5
+    Stage1 --> Stage2
+    Stage2 --> Stage3
+    Stage3 --> Stage4
+    Stage4 --> Stage5
 
     style Stage1 fill:#e6f3ff,stroke:#333
     style Stage2 fill:#fff3e6,stroke:#333
@@ -82,6 +83,10 @@ graph TD
 | `PERSONAL_ACCESS_TOKEN` | Repository secret | Enables cross-repository push (Hugo repo -> Pages repo) |
 | `submodules: true` | Checkout step | Fetches Ananke Hugo theme |
 | `fetch-depth: 0` | Checkout step | Full git history for Hugo's `.GitInfo` |
+| `hugo --buildFuture` | Build step | Includes posts with future `date` values in the build output |
+| `public/` in `.gitignore` | Source repo | Build output is not committed; runner copies it directly to Pages repo |
+| `actions/checkout@v4` | Checkout step | Current version (v3 deprecated with Node.js 16) |
+| `peaceiris/actions-hugo@v3` | Setup Hugo step | Current version (v2 deprecated with Node.js 16) |
 
 ---
 
@@ -89,14 +94,14 @@ graph TD
 
 **File**: `workflows/auto-publish-workflow.json`
 **Trigger**: Schedule (every 5 minutes)
-**Total Nodes**: 13 (12 active + 1 no-op)
+**Total Nodes**: 14 (13 active + 1 no-op)
 
 ### Workflow Canvas
 
 ```
-Poll Every  -> Fetch     -> Extract    -> Fetch    -> Parse     -> Is Not  -> Prepare  -> AI Generate -> Format   -> Get       -> Prepare  -> Post to
-5 Minutes     Latest       New Post      Post       Front       Draft?     HF          LinkedIn       LinkedIn    LinkedIn     LinkedIn    LinkedIn
-              Deployment   Slugs         Markdown   matter                 Request      Post           Post       Profile      Post
+Poll Every  -> Fetch     -> Extract    -> Fetch    -> Parse     -> Is Not  -> Prepare  -> AI Generate -> Format   -> Wait for  -> Get       -> Prepare  -> Post to
+5 Minutes     Latest       New Post      Post       Front       Draft?     HF          LinkedIn       LinkedIn    Approval      LinkedIn     LinkedIn    LinkedIn
+              Deployment   Slugs         Markdown   matter                 Request      Post           Post        (n8n UI)    Profile      Post
                                                                   |
                                                                   v
                                                               Skip (Draft)
@@ -301,7 +306,33 @@ Tries `choices[0].message.content`, falls back to `[0].generated_text`, then to 
 
 ---
 
-#### Node 10: Get LinkedIn Profile
+#### Node 10: Wait for Approval
+
+| Property | Value |
+|---|---|
+| **Type** | `n8n-nodes-base.wait` |
+| **Resume** | `webhook` |
+| **Webhook Suffix** | `approve` |
+
+Pauses the workflow execution and waits for a manual approval signal before proceeding to publish on LinkedIn. The execution remains in a **"Waiting"** state visible in the n8n UI.
+
+**Why this exists**: LinkedIn's `lifecycleState: SCHEDULED` API requires Marketing Partner access and is rejected for standard developer apps. Instead of posting immediately (which bypasses review), the workflow pauses here to allow the author to review and edit the AI-generated post before it goes live.
+
+**How to approve and publish**:
+
+1. Open n8n at `http://localhost:5678`
+2. Go to **Executions** (left sidebar)
+3. Find the execution in **"Waiting"** state
+4. Click on it to open the execution detail
+5. In the **Wait for Approval** node, copy the `resumeUrl` from the node output
+6. Open the `resumeUrl` in your browser to resume the execution
+7. The workflow continues: fetches your LinkedIn profile, builds the post body, and publishes
+
+> **Tip**: The execution will wait indefinitely until resumed or manually stopped. If you decide not to post, click **"Stop"** on the waiting execution.
+
+---
+
+#### Node 11: Get LinkedIn Profile
 
 | Property | Value |
 |---|---|
@@ -314,21 +345,22 @@ Returns the `sub` field -- the person URN ID.
 
 ---
 
-#### Node 11: Prepare LinkedIn Post
+#### Node 12: Prepare LinkedIn Post
 
 | Property | Value |
 |---|---|
 | **Type** | `n8n-nodes-base.code` (JavaScript) |
-| **Purpose** | Build LinkedIn UGC Post API body as a **scheduled post** |
+| **Purpose** | Build LinkedIn UGC Post API body for immediate publishing |
 
-Creates a scheduled post set to publish **24 hours from the time of execution**. This gives you a review window to edit or publish early from LinkedIn's UI before it auto-publishes.
+Builds the request body for `POST /v2/ugcPosts`. The post is published immediately (`lifecycleState: PUBLISHED`) since the review window is handled by the Wait for Approval node upstream.
 
-**Scheduled post body**:
+**Note**: `lifecycleState: SCHEDULED` with `scheduledPublishTime` requires LinkedIn Marketing Partner access and returns a 403 for standard developer apps. Do not use `SCHEDULED`.
+
+**Post body**:
 ```json
 {
   "author": "urn:li:person:{personId}",
-  "lifecycleState": "SCHEDULED",
-  "scheduledPublishTime": 1234567890000,
+  "lifecycleState": "PUBLISHED",
   "specificContent": {
     "com.linkedin.ugc.ShareContent": {
       "shareCommentary": { "text": "AI-generated post text..." },
@@ -346,19 +378,11 @@ Creates a scheduled post set to publish **24 hours from the time of execution**.
 }
 ```
 
-**`scheduledPublishTime`** is a Unix timestamp in milliseconds: `Date.now() + (24 * 60 * 60 * 1000)`.
-
-**How to review and publish from LinkedIn**:
-
-1. Open **LinkedIn** (web or mobile)
-2. Go to **Me** → **Posts & Activity** → **Scheduled**
-3. Find the scheduled post (shows with the article link preview)
-4. Click **Edit** to modify the text if needed
-5. Click **Post now** to publish immediately, or leave it to auto-publish in 24 hours
+LinkedIn crawls the `originalUrl` to generate the article card preview. Since n8n only fires after a new commit appears on the Pages repo, the URL is already live and crawlable.
 
 ---
 
-#### Node 12: Post to LinkedIn
+#### Node 13: Post to LinkedIn
 
 | Property | Value |
 |---|---|
@@ -367,11 +391,11 @@ Creates a scheduled post set to publish **24 hours from the time of execution**.
 | **URL** | `https://api.linkedin.com/v2/ugcPosts` |
 | **Auth** | LinkedIn OAuth2 |
 
-Creates the scheduled post. Returns the post URN on success (e.g., `urn:li:ugcPost:1234567890`).
+Creates and immediately publishes the post. Returns the post URN on success (e.g., `urn:li:ugcPost:1234567890`).
 
 ---
 
-#### Node 13: Skip (Draft)
+#### Node 14: Skip (Draft)
 
 | Property | Value |
 |---|---|
@@ -396,6 +420,7 @@ graph TD
         NE4["HuggingFace API fails"] --> NA4["Fallback post generated"]
         NE5["LinkedIn API fails"] --> NA5["Check OAuth refresh"]
         NE6["Draft post detected"] --> NA6["Skip node"]
+        NE7["Wait node not approved"] --> NA7["Execution stays Waiting<br/>Stop manually if not posting"]
     end
 
     style NA4 fill:#ffcc66,stroke:#333
@@ -411,8 +436,9 @@ graph TD
 | n8n workflow fails | No impact | No LinkedIn post |
 | HuggingFace API down | No impact | Fallback text used |
 | LinkedIn API down | No impact | Post not published |
+| Wait node not resumed | No impact | Execution stays Waiting; stop manually |
 
 ---
 
-*Last Updated: 2026-03-14*
+*Last Updated: 2026-03-15*
 *Project: n8n-Powered Auto Web Publish*
